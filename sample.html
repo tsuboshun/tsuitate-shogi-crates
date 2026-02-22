@@ -1,0 +1,87 @@
+<!doctype html>
+<html lang="ja">
+
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>tsuitate_bind sample</title>
+</head>
+
+<body>
+  <h1>tsuitate_bind sample</h1>
+  <p>Open this page over HTTP, not with <code>file://</code>.</p>
+  <pre>1) Build pkg
+cd tsuitate_bind
+wasm-pack build --target web --out-dir ../pkg
+
+2) Start an HTTP server at the repository root
+cd ..
+python3 -m http.server 8000
+
+3) Open in your browser
+http://localhost:8000/sample.html</pre>
+  <input id="moves" type="text" value="+7776FU-3334FU+5968OU-5142OU+6877OU+8822UM" style="width: 50%" />
+  <button id="run">Run</button>
+  <pre id="result"></pre>
+
+  <script type="module">
+    import init, { WasmGame } from "./pkg/tsuitate_bind.js";
+
+    const SHOGI = 1;
+    const INITIAL_SFEN =
+      "sfen lnsgkgsnl/1r5b1/ppppppppp/9/9/9/PPPPPPPPP/1B5R1/LNSGKGSNL b - 1";
+
+    const movesInput = document.getElementById("moves");
+    const runButton = document.getElementById("run");
+    const result = document.getElementById("result");
+
+    function splitMoves(text) {
+      return (text.match(/[+-][0-9]{4}[A-Z]{2}/g) || []);
+    }
+
+    function infoLabel(info) {
+      const labels = {
+        0: "None",
+        1: "Foul",
+        2: "FoulUnderCheck",
+        3: "Check",
+        4: "Checkmate",
+        5: "LossByFoul",
+        6: "Draw",
+      };
+      return labels[info] ?? String(info);
+    }
+
+    function render() {
+      const game = new WasmGame(INITIAL_SFEN, SHOGI, true, 3, 9, 9, 150);
+      const moves = splitMoves(movesInput.value.trim());
+      const infos = [];
+      const captures = [];
+
+      for (const mv of moves) {
+        if (!game.make_move(mv)) {
+          result.textContent = `invalid move: ${mv}`;
+          return;
+        }
+        if (game.last_info !== undefined) {
+          infos.push(infoLabel(game.last_info));
+        }
+        if (game.last_capture !== undefined) {
+          captures.push(game.last_capture === "" ? "-" : game.last_capture);
+        }
+      }
+
+      result.textContent =
+        `sfen: ${game.sfen}\n` +
+        `fouls: [${game.fouls.join(", ")}]\n` +
+        `infos: [${infos.join(", ")}]\n` +
+        `captures: [${captures.join(", ")}]`;
+    }
+
+    await init();
+    runButton.addEventListener("click", render);
+    render();
+  </script>
+</body>
+
+</html>

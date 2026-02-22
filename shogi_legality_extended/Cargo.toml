@@ -1,0 +1,14 @@
+cargo-features = ["edition2024"]
+
+[package]
+name = "shogi_legality_extended"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[lib]
+crate-type = ["rlib"]
+
+[dependencies]
+shogi_core = "0.1.5"
+shogi_usi_parser = "0.1.0"

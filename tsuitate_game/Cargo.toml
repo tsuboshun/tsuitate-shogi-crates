@@ -1,0 +1,15 @@
+cargo-features = ["edition2024"]
+
+[package]
+name = "tsuitate_game"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[lib]
+crate-type = ["rlib"]
+
+[dependencies]
+shogi_core = "0.1.5"
+shogi_legality_extended = { path = "../shogi_legality_extended" }
+shogi_usi_parser = "0.1.0"
