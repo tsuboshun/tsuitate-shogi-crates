@@ -1,0 +1,19 @@
+[build-system]
+requires = ["maturin>=1.7,<2"]
+build-backend = "maturin"
+
+[project]
+name = "tsuitate-bindings"
+version = "0.1.0"
+requires-python = ">=3.8"
+description = "Python bindings for Tsuitate Shogi game logic"
+readme = "../README.md"
+license = "MIT"
+
+[project.optional-dependencies]
+test = ["pytest>=8"]
+
+[tool.maturin]
+features = ["python"]
+module-name = "tsuitate_bindings"
+compatibility = "manylinux2014"

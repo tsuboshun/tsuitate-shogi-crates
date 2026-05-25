@@ -1,5 +1,3 @@
-cargo-features = ["edition2024"]
-
 [package]
 name = "shogi_legality_extended"
 version = "0.1.0"

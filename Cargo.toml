@@ -2,7 +2,7 @@
 members = [
   "shogi_legality_extended",
   "tsuitate_game",
-  "tsuitate_bind",
+  "tsuitate_bindings",
 ]
 resolver = "3"
 

@@ -14,30 +14,37 @@ pub enum Info {
 
 #[derive(Eq, PartialEq, Clone, Debug, Default)]
 pub struct Game {
-    initial: PartialPosition,
     pub inner: PartialPosition,
     pub fouls: [i8; 2],
     pub draw_move_count: u16,
-    pub moves: Vec<Move>,
-    pub infos: Vec<Info>,
-    pub captures: Vec<Option<PieceKind>>, // it is a kind of info, but treat it separately for simplicity
+    pub last_move: Option<Move>,
+    pub last_info: Option<Info>,
+    pub last_capture: Option<PieceKind>,
 }
 
 impl Game {
-    pub fn new(initial: PartialPosition, fouls: [i8; 2], draw_move_count: u16) -> Self {
+    pub fn new(
+        initial: PartialPosition,
+        fouls: [i8; 2],
+        draw_move_count: u16,
+        last_info: Option<Info>,
+    ) -> Self {
         Self {
-            initial: initial.clone(),
             inner: initial,
             fouls,
             draw_move_count,
-            moves: Vec::new(),
-            infos: Vec::new(),
-            captures: Vec::new(),
+            last_move: None,
+            last_info,
+            last_capture: None,
         }
     }
 
     pub fn make_move(&mut self, mv: Move, setting: &Setting) -> Option<()> {
-        if self.fouls[0] < 0 || self.fouls[1] < 0 || self.inner.ply() > self.draw_move_count {
+        if self.fouls[0] < 0
+            || self.fouls[1] < 0
+            || self.inner.ply() > self.draw_move_count
+            || self.last_info == Some(Info::Checkmate)
+        {
             return None;
         }
         if !is_valid(&self.inner, mv, &setting) {
@@ -54,12 +61,10 @@ impl Game {
             )
         {
             // a foul specific to tsuitate
-            self.moves.push(mv);
-            let mut info = match self.infos.last() {
+            let mut info = match self.last_info {
                 Some(Info::Check) | Some(Info::FoulUnderCheck) => Info::FoulUnderCheck,
                 _ => Info::Foul,
             };
-            self.captures.push(None);
             match self.inner.side_to_move() {
                 Color::Black => {
                     self.fouls[0] -= 1;
@@ -71,7 +76,9 @@ impl Game {
             if self.fouls[0] < 0 || self.fouls[1] < 0 {
                 info = Info::LossByFoul;
             }
-            self.infos.push(info);
+            self.last_move = Some(mv);
+            self.last_info = Some(info);
+            self.last_capture = None;
             return Some(());
         }
         // tentative move
@@ -92,11 +99,10 @@ impl Game {
                 // in normal shogi, do nothing
                 return None;
             }
-            self.moves.push(mv);
-            let mut info = match self.infos.last() {
+            let mut info = match self.last_info {
                 Some(Info::Check) | Some(Info::FoulUnderCheck) => Info::FoulUnderCheck,
                 None => {
-                    // if the initial position of this game is in a state of check, self.infos.last() is None
+                    // if the initial position of this game is in a state of check, self.last_info is None
                     // but we should treat it as FoulUnderCheck
                     match will_king_be_captured(
                         &self.inner,
@@ -109,7 +115,6 @@ impl Game {
                 }
                 _ => Info::Foul,
             };
-            self.captures.push(None);
             match self.inner.side_to_move() {
                 Color::Black => {
                     self.fouls[0] -= 1;
@@ -121,35 +126,30 @@ impl Game {
             if self.fouls[0] < 0 || self.fouls[1] < 0 {
                 info = Info::LossByFoul;
             }
-            self.infos.push(info);
+            self.last_move = Some(mv);
+            self.last_info = Some(info);
+            self.last_capture = None;
             return Some(());
         } else {
-            // captured piece?
-            match mv {
+            let last_capture = match mv {
                 Move::Normal {
                     from: _,
                     to,
                     promote: _,
-                } => {
-                    if let Some(piece) = self.inner.piece_at(to) {
-                        let obtaining = piece.piece_kind();
-                        let captured = if let Some(piece_kind) = obtaining.unpromote() {
-                            piece_kind
-                        } else {
-                            obtaining
-                        };
-                        self.captures.push(Some(captured));
+                } => self.inner.piece_at(to).map(|piece| {
+                    let obtaining = piece.piece_kind();
+                    if let Some(piece_kind) = obtaining.unpromote() {
+                        piece_kind
                     } else {
-                        self.captures.push(None);
+                        obtaining
                     }
-                }
-                _ => {
-                    self.captures.push(None);
-                }
+                }),
+                _ => None,
             };
             // checked or checkmated opponent's king?
             self.inner = partial_pos;
-            self.moves.push(mv);
+            self.last_move = Some(mv);
+            self.last_capture = last_capture;
             let is_opponent_king_in_check = match will_king_be_captured(
                 &self.inner,
                 self.inner.side_to_move().flip(),
@@ -158,7 +158,7 @@ impl Game {
                 Some(value) => value,
                 None => {
                     // when opponent king does not exist (this is possible in Tsume Shogi)
-                    self.infos.push(Info::None);
+                    self.last_info = Some(Info::None);
                     return Some(());
                 }
             };
@@ -171,7 +171,7 @@ impl Game {
             if info != Info::Checkmate && self.inner.ply() > self.draw_move_count {
                 info = Info::Draw;
             }
-            self.infos.push(info);
+            self.last_info = Some(info);
             return Some(());
         }
     }
@@ -197,18 +197,16 @@ mod tests {
             .unwrap(),
             [9, 9],
             150,
+            None,
         );
         let setting = Setting::new(9, 9, 3, GameKind::Shogi, true);
-        game.make_move(csa_to_move("+7776FU", &game.inner), &setting);
-        game.make_move(csa_to_move("-3334FU", &game.inner), &setting);
-        game.make_move(csa_to_move("+5968OU", &game.inner), &setting);
-        game.make_move(csa_to_move("-5142OU", &game.inner), &setting);
-        game.make_move(csa_to_move("+6877OU", &game.inner), &setting);
+        game.make_move(csa_to_move("+7776FU", &game.inner).unwrap(), &setting);
+        game.make_move(csa_to_move("-3334FU", &game.inner).unwrap(), &setting);
+        game.make_move(csa_to_move("+5968OU", &game.inner).unwrap(), &setting);
+        game.make_move(csa_to_move("-5142OU", &game.inner).unwrap(), &setting);
+        game.make_move(csa_to_move("+6877OU", &game.inner).unwrap(), &setting);
 
-        assert_eq!(
-            game.infos,
-            vec![Info::None, Info::None, Info::None, Info::None, Info::Foul]
-        );
+        assert_eq!(game.last_info, Some(Info::Foul));
         assert_eq!(game.fouls, [8, 9]);
     }
 
@@ -218,16 +216,17 @@ mod tests {
             PartialPosition::from_usi("sfen 6gks/7p1/7P1/6SKG/9/9/9/9/9 b - 1").unwrap(),
             [9, 9],
             150,
+            None,
         );
         let setting = Setting::new(3, 4, 1, GameKind::Dobutsu, false);
-        game.make_move(csa_to_move("+2322FU", &game.inner), &setting);
-        game.make_move(csa_to_move("-1122GI", &game.inner), &setting);
-        let result = game.make_move(csa_to_move("+0022FU", &game.inner), &setting);
+        game.make_move(csa_to_move("+2322FU", &game.inner).unwrap(), &setting);
+        game.make_move(csa_to_move("-1122GI", &game.inner).unwrap(), &setting);
+        let result = game.make_move(csa_to_move("+0022FU", &game.inner).unwrap(), &setting);
         assert_eq!(result, None);
         let setting = Setting::new(3, 4, 1, GameKind::Dobutsu, true);
-        let result = game.make_move(csa_to_move("+0022FU", &game.inner), &setting);
+        let result = game.make_move(csa_to_move("+0022FU", &game.inner).unwrap(), &setting);
         assert_eq!(result, Some(()));
-        assert_eq!(game.infos, vec![Info::Check, Info::None, Info::Foul]);
+        assert_eq!(game.last_info, Some(Info::Foul));
     }
 
     #[test]
@@ -236,6 +235,7 @@ mod tests {
             PartialPosition::from_usi("sfen 7gg/7K1/9/9/9/9/9/9/9 b - 1").unwrap(),
             [9, 9],
             150,
+            None,
         );
         let setting = Setting::new(9, 9, 3, GameKind::Shogi, true);
         assert_eq!(is_mate(&game.inner, &setting), Some(false));
@@ -249,12 +249,13 @@ mod tests {
             PartialPosition::from_usi("sfen 6gks/7p1/7P1/6SKG/9/9/9/9/9 b - 1").unwrap(),
             [9, 9],
             150,
+            None,
         );
         let setting = Setting::new(3, 4, 1, GameKind::Dobutsu, true);
-        let result = game.make_move(csa_to_move("+3433GI", &game.inner), &setting);
+        let result = game.make_move(csa_to_move("+3433GI", &game.inner).unwrap(), &setting);
         assert_eq!(result, None); // in dobutsu, GI represents Elephant, which only moves diagonally
         let setting = Setting::new(3, 4, 1, GameKind::Shogi, true);
-        let result = game.make_move(csa_to_move("+3433GI", &game.inner), &setting);
+        let result = game.make_move(csa_to_move("+3433GI", &game.inner).unwrap(), &setting);
         assert_eq!(result, Some(()));
     }
 }

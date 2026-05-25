@@ -28,7 +28,7 @@ pub struct Setting {
     pub is_tsuitate: bool,
     pub files: u8,
     pub ranks: u8,
-    pub promotion_ranks: u8,
+    pub promotion_rank: u8,
     pub board_mask: Bitboard,
 }
 
@@ -36,10 +36,17 @@ impl Setting {
     pub fn new(
         files: u8,
         ranks: u8,
-        promotion_ranks: u8,
+        promotion_rank: u8,
         game_kind: GameKind,
         is_tsuitate: bool,
     ) -> Self {
+        assert!((1..=9).contains(&files), "files must be in 1..=9");
+        assert!((1..=9).contains(&ranks), "ranks must be in 1..=9");
+        assert!(
+            promotion_rank <= ranks,
+            "promotion_rank must be less than or equal to ranks"
+        );
+
         let mut board_mask = Bitboard::empty();
         for file in 1..=files {
             unsafe {
@@ -50,7 +57,7 @@ impl Setting {
         Setting {
             files,
             ranks,
-            promotion_ranks,
+            promotion_rank,
             game_kind,
             is_tsuitate,
             board_mask,

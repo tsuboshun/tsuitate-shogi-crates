@@ -1,15 +1,27 @@
-fn split_sfen_parts(sfen: &str) -> (&str, &str, &str, &str, bool) {
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum SfenNormalizeError {
+    InvalidFormat,
+    InvalidPromotion,
+    InvalidRanks,
+    InvalidFiles,
+    NonRectangularBoard,
+    Expected9x9Sfen,
+    InvalidBoardSize,
+    Invalid9x9Row,
+}
+
+fn split_sfen_parts(sfen: &str) -> Result<(&str, &str, &str, &str, bool), SfenNormalizeError> {
     let parts: Vec<&str> = sfen.split_whitespace().collect();
     match parts.as_slice() {
         ["sfen", board, turn, hands, move_number, ..] => {
-            (*board, *turn, *hands, *move_number, true)
+            Ok((*board, *turn, *hands, *move_number, true))
         }
-        [board, turn, hands, move_number, ..] => (*board, *turn, *hands, *move_number, false),
-        _ => panic!("invalid sfen format"),
+        [board, turn, hands, move_number, ..] => Ok((*board, *turn, *hands, *move_number, false)),
+        _ => Err(SfenNormalizeError::InvalidFormat),
     }
 }
 
-fn expand_row(row: &str) -> Vec<String> {
+fn expand_row(row: &str) -> Result<Vec<String>, SfenNormalizeError> {
     let chars: Vec<char> = row.chars().collect();
     let mut cells = Vec::with_capacity(9);
     let mut i = 0usize;
@@ -25,7 +37,7 @@ fn expand_row(row: &str) -> Vec<String> {
         }
         if c == '+' {
             if i + 1 >= chars.len() {
-                panic!("invalid promotion in sfen");
+                return Err(SfenNormalizeError::InvalidPromotion);
             }
             cells.push(format!("{}{}", c, chars[i + 1]));
             i += 2;
@@ -34,7 +46,7 @@ fn expand_row(row: &str) -> Vec<String> {
         cells.push(c.to_string());
         i += 1;
     }
-    cells
+    Ok(cells)
 }
 
 fn compress_row(cells: &[String]) -> String {
@@ -57,25 +69,25 @@ fn compress_row(cells: &[String]) -> String {
     out
 }
 
-pub fn normalize_sfen_to_9x9(sfen: &str) -> (String, u8, u8) {
-    let (board, turn, hands, move_number, _) = split_sfen_parts(sfen);
+pub fn normalize_sfen_to_9x9(sfen: &str) -> Result<(String, u8, u8), SfenNormalizeError> {
+    let (board, turn, hands, move_number, _) = split_sfen_parts(sfen)?;
     let rows: Vec<&str> = board.split('/').collect();
     let ranks = rows.len();
     if !(1..=9).contains(&ranks) {
-        panic!("invalid ranks");
+        return Err(SfenNormalizeError::InvalidRanks);
     }
 
     let mut files: Option<usize> = None;
     let mut expanded_rows = Vec::with_capacity(9);
     for row in rows {
-        let cells = expand_row(row);
+        let cells = expand_row(row)?;
         let count = cells.len();
         if !(1..=9).contains(&count) {
-            panic!("invalid files");
+            return Err(SfenNormalizeError::InvalidFiles);
         }
         if let Some(prev) = files {
             if prev != count {
-                panic!("non-rectangular board");
+                return Err(SfenNormalizeError::NonRectangularBoard);
             }
         } else {
             files = Some(count);
@@ -95,30 +107,34 @@ pub fn normalize_sfen_to_9x9(sfen: &str) -> (String, u8, u8) {
     }
 
     let board_9x9 = expanded_rows.join("/");
-    (
+    Ok((
         format!("sfen {} {} {} {}", board_9x9, turn, hands, move_number),
         files.unwrap() as u8,
         ranks as u8,
-    )
+    ))
 }
 
-pub fn denormalize_sfen_from_9x9(sfen: &str, files: u8, ranks: u8) -> String {
-    let (board, turn, hands, move_number, has_prefix) = split_sfen_parts(sfen);
+pub fn denormalize_sfen_from_9x9(
+    sfen: &str,
+    files: u8,
+    ranks: u8,
+) -> Result<String, SfenNormalizeError> {
+    let (board, turn, hands, move_number, has_prefix) = split_sfen_parts(sfen)?;
     let rows: Vec<&str> = board.split('/').collect();
     if rows.len() != 9 {
-        panic!("expected 9x9 sfen");
+        return Err(SfenNormalizeError::Expected9x9Sfen);
     }
     let files = files as usize;
     let ranks = ranks as usize;
     if !(1..=9).contains(&files) || !(1..=9).contains(&ranks) {
-        panic!("invalid board size");
+        return Err(SfenNormalizeError::InvalidBoardSize);
     }
 
     let mut trimmed_rows = Vec::with_capacity(ranks);
     for row in rows.iter().take(ranks) {
-        let cells = expand_row(row);
+        let cells = expand_row(row)?;
         if cells.len() != 9 {
-            panic!("invalid 9x9 row");
+            return Err(SfenNormalizeError::Invalid9x9Row);
         }
         let tail = &cells[(9 - files)..];
         trimmed_rows.push(compress_row(tail));
@@ -126,8 +142,11 @@ pub fn denormalize_sfen_from_9x9(sfen: &str, files: u8, ranks: u8) -> String {
 
     let board_rect = trimmed_rows.join("/");
     if has_prefix {
-        format!("sfen {} {} {} {}", board_rect, turn, hands, move_number)
+        Ok(format!(
+            "sfen {} {} {} {}",
+            board_rect, turn, hands, move_number
+        ))
     } else {
-        format!("{} {} {} {}", board_rect, turn, hands, move_number)
+        Ok(format!("{} {} {} {}", board_rect, turn, hands, move_number))
     }
 }

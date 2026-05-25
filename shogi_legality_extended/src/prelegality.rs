@@ -16,6 +16,9 @@ pub fn is_valid(position: &PartialPosition, mv: Move, setting: &Setting) -> bool
     let side = position.side_to_move();
     match mv {
         Move::Normal { from, to, promote } => {
+            if !setting.board_mask.contains(from) {
+                return false;
+            }
             // Is `from` occupied by `side`'s piece?
             let from_piece = if let Some(x) = position.piece_at(from) {
                 x
@@ -53,13 +56,13 @@ pub fn is_valid(position: &PartialPosition, mv: Move, setting: &Setting) -> bool
                 }
             }
             // Can promote?
-            let promotion_ranks = match from_piece.piece_kind() {
-                PieceKind::Knight => max(2, setting.promotion_ranks), // Knight is exception
-                _ => setting.promotion_ranks,
+            let promotion_rank = match from_piece.piece_kind() {
+                PieceKind::Knight => max(2, setting.promotion_rank), // Knight is exception
+                _ => setting.promotion_rank,
             };
             if promote
-                && relative_rank(from, side, &setting) > promotion_ranks as i8
-                && rel_rank > promotion_ranks as i8
+                && relative_rank(from, side, &setting) > promotion_rank as i8
+                && rel_rank > promotion_rank as i8
             {
                 return false;
             }
@@ -253,7 +256,7 @@ pub fn is_mate(position: &PartialPosition, setting: &Setting) -> Option<bool> {
     let setting = Setting::new(
         setting.files,
         setting.ranks,
-        setting.promotion_ranks,
+        setting.promotion_rank,
         setting.game_kind,
         false,
     );

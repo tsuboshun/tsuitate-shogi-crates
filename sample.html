@@ -4,14 +4,14 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>tsuitate_bind sample</title>
+  <title>tsuitate_bindings sample</title>
 </head>
 
 <body>
-  <h1>tsuitate_bind sample</h1>
+  <h1>tsuitate_bindings sample</h1>
   <p>Open this page over HTTP, not with <code>file://</code>.</p>
   <pre>1) Build pkg
-cd tsuitate_bind
+cd tsuitate_bindings
 wasm-pack build --target web --out-dir ../pkg
 
 2) Start an HTTP server at the repository root
@@ -25,7 +25,7 @@ http://localhost:8000/sample.html</pre>
   <pre id="result"></pre>
 
   <script type="module">
-    import init, { WasmGame } from "./pkg/tsuitate_bind.js";
+    import init, { WasmGame } from "./pkg/tsuitate_bindings.js";
 
     const SHOGI = 1;
     const INITIAL_SFEN =
@@ -67,7 +67,7 @@ http://localhost:8000/sample.html</pre>
           infos.push(infoLabel(game.last_info));
         }
         if (game.last_capture !== undefined) {
-          captures.push(game.last_capture === "" ? "-" : game.last_capture);
+          captures.push(game.last_capture);
         }
       }
 
