@@ -21,7 +21,7 @@ fn split_sfen_parts(sfen: &str) -> Result<(&str, &str, &str, &str, bool), SfenNo
     }
 }
 
-fn expand_row(row: &str) -> Result<Vec<String>, SfenNormalizeError> {
+fn expand_row(row: &str, unknown_as_empty: bool) -> Result<Vec<String>, SfenNormalizeError> {
     let chars: Vec<char> = row.chars().collect();
     let mut cells = Vec::with_capacity(9);
     let mut i = 0usize;
@@ -41,6 +41,11 @@ fn expand_row(row: &str) -> Result<Vec<String>, SfenNormalizeError> {
             }
             cells.push(format!("{}{}", c, chars[i + 1]));
             i += 2;
+            continue;
+        }
+        if c == '?' && unknown_as_empty {
+            cells.push(String::new());
+            i += 1;
             continue;
         }
         cells.push(c.to_string());
@@ -80,7 +85,7 @@ pub fn normalize_sfen_to_9x9(sfen: &str) -> Result<(String, u8, u8), SfenNormali
     let mut files: Option<usize> = None;
     let mut expanded_rows = Vec::with_capacity(9);
     for row in rows {
-        let cells = expand_row(row)?;
+        let cells = expand_row(row, true)?;
         let count = cells.len();
         if !(1..=9).contains(&count) {
             return Err(SfenNormalizeError::InvalidFiles);
@@ -132,7 +137,7 @@ pub fn denormalize_sfen_from_9x9(
 
     let mut trimmed_rows = Vec::with_capacity(ranks);
     for row in rows.iter().take(ranks) {
-        let cells = expand_row(row)?;
+        let cells = expand_row(row, false)?;
         if cells.len() != 9 {
             return Err(SfenNormalizeError::Invalid9x9Row);
         }

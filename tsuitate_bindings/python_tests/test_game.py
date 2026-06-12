@@ -26,6 +26,19 @@ def test_make_move_updates_sfen():
     )
 
 
+def test_viewpoint_sfen_and_last_move_helpers():
+    game = new_standard_game()
+
+    assert (
+        game.sfen_for("+")
+        == "9/9/9/9/9/9/PPPPPPPPP/1B5R1/LNSGKGSNL b - 1"
+    )
+    assert "?" in game.sfen_for("+", True)
+    assert game.make_move("+7776FU")
+    assert game.last_move_for("+") == "+7776FU"
+    assert game.last_move_for("-") == "+0000ZZ"
+
+
 def test_make_move_ignore_turn_restores_turn_after_failure():
     game = new_standard_game()
 

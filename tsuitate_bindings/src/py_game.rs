@@ -21,6 +21,15 @@ fn parse_csa_color(csa_color: &str) -> Option<Color> {
     Some(color)
 }
 
+fn parse_optional_csa_color(csa_color: Option<&str>) -> PyResult<Option<Color>> {
+    match csa_color {
+        Some(value) => parse_csa_color(value)
+            .map(Some)
+            .ok_or_else(|| PyValueError::new_err("invalid color")),
+        None => Ok(None),
+    }
+}
+
 #[pyclass(name = "Game")]
 pub(crate) struct PyGame {
     inner: GameApi,
@@ -73,7 +82,14 @@ impl PyGame {
 
     #[getter]
     fn sfen(&self) -> String {
-        self.inner.sfen()
+        self.inner.sfen(None, false)
+    }
+
+    #[pyo3(signature = (csa_color=None, is_dark_shogi=false))]
+    fn sfen_for(&self, csa_color: Option<&str>, is_dark_shogi: bool) -> PyResult<String> {
+        Ok(self
+            .inner
+            .sfen(parse_optional_csa_color(csa_color)?, is_dark_shogi))
     }
 
     #[getter]
@@ -92,7 +108,14 @@ impl PyGame {
 
     #[getter]
     fn last_move(&self) -> Option<String> {
-        self.inner.last_move_csa()
+        self.inner.last_move_csa(None)
+    }
+
+    #[pyo3(signature = (csa_color=None))]
+    fn last_move_for(&self, csa_color: Option<&str>) -> PyResult<Option<String>> {
+        Ok(self
+            .inner
+            .last_move_csa(parse_optional_csa_color(csa_color)?))
     }
 
     #[getter]

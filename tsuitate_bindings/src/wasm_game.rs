@@ -1,3 +1,4 @@
+use shogi_core::Color;
 use tsify_next::Tsify;
 use wasm_bindgen::prelude::*;
 
@@ -11,6 +12,15 @@ fn js_error(message: &str) -> JsValue {
 #[cfg(not(target_arch = "wasm32"))]
 fn js_error(_message: &str) -> JsValue {
     JsValue::NULL
+}
+
+fn parse_optional_csa_color(csa_color: Option<char>) -> Result<Option<Color>, JsValue> {
+    match csa_color {
+        Some('+') => Ok(Some(Color::Black)),
+        Some('-') => Ok(Some(Color::White)),
+        Some(_) => Err(js_error("invalid color")),
+        None => Ok(None),
+    }
 }
 
 #[derive(Tsify, PartialEq, Eq, Clone, Debug)]
@@ -68,7 +78,19 @@ impl WasmGame {
 
     #[wasm_bindgen(getter)]
     pub fn sfen(&self) -> String {
-        self.inner.sfen()
+        self.inner.sfen(None, false)
+    }
+
+    #[wasm_bindgen]
+    pub fn sfen_for(
+        &self,
+        csa_color: Option<char>,
+        is_dark_shogi: Option<bool>,
+    ) -> Result<String, JsValue> {
+        Ok(self.inner.sfen(
+            parse_optional_csa_color(csa_color)?,
+            is_dark_shogi.unwrap_or(false),
+        ))
     }
 
     #[wasm_bindgen(getter)]
@@ -88,7 +110,14 @@ impl WasmGame {
 
     #[wasm_bindgen(getter)]
     pub fn last_move(&self) -> Option<String> {
-        self.inner.last_move_csa()
+        self.inner.last_move_csa(None)
+    }
+
+    #[wasm_bindgen]
+    pub fn last_move_for(&self, csa_color: Option<char>) -> Result<Option<String>, JsValue> {
+        Ok(self
+            .inner
+            .last_move_csa(parse_optional_csa_color(csa_color)?))
     }
 
     #[wasm_bindgen(getter)]
@@ -147,6 +176,37 @@ mod tests {
             game.sfen(),
             "lnsgkgsnl/1r5b1/ppppppppp/9/9/2P6/PP1PPPPPP/1B5R1/LNSGKGSNL w - 2"
         )
+    }
+
+    #[test]
+    fn viewpoint_helpers_hide_opponent_state() {
+        let mut game = WasmGame::new(
+            "sfen lnsgkgsnl/1r5b1/ppppppppp/9/9/9/PPPPPPPPP/1B5R1/LNSGKGSNL b - 1",
+            GameKind::Shogi.to_u8(),
+            false,
+            3,
+            9,
+            9,
+            150,
+            None,
+        )
+        .unwrap();
+
+        assert_eq!(
+            game.sfen_for(Some('+'), None).unwrap(),
+            "9/9/9/9/9/9/PPPPPPPPP/1B5R1/LNSGKGSNL b - 1"
+        );
+        assert!(game.make_move("+7776FU"));
+        assert_eq!(
+            game.last_move_for(Some('+')).unwrap().as_deref(),
+            Some("+7776FU")
+        );
+        assert_eq!(
+            game.last_move_for(Some('-')).unwrap().as_deref(),
+            Some("+0000ZZ")
+        );
+        assert!(game.sfen_for(Some('*'), None).is_err());
+        assert!(game.sfen_for(Some('+'), Some(true)).unwrap().contains('?'));
     }
 
     #[test]

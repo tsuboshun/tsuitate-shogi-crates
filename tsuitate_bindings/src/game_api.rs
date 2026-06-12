@@ -1,6 +1,6 @@
 use std::fmt;
 
-use shogi_core::{Color, Move, PartialPosition, Piece, PieceKind, Square, ToUsi};
+use shogi_core::{Bitboard, Color, Hand, Move, PartialPosition, Piece, PieceKind, Square, ToUsi};
 use shogi_legality_extended::{GameKind, Setting, from_candidates, is_valid};
 use shogi_usi_parser::FromUsi;
 use tsuitate_game::{Game, Info, csa_to_move, csa_to_piece_kind, nth_ascii};
@@ -87,6 +87,12 @@ fn piece_kind_to_csa(piece_kind: PieceKind) -> &'static str {
     }
 }
 
+fn piece_to_sfen(piece: Piece) -> String {
+    let mut buf = String::new();
+    piece.to_usi(&mut buf).unwrap();
+    buf
+}
+
 pub(crate) struct GameApi {
     inner: Game,
     setting: Setting,
@@ -140,10 +146,19 @@ impl GameApi {
         self.inner.last_move
     }
 
-    pub(crate) fn last_move_csa(&self) -> Option<String> {
+    pub(crate) fn last_move_csa(&self, viewpoint: Option<Color>) -> Option<String> {
         let mv = self.last_move()?;
         let color = infer_last_move_color(self, &mv);
         let sign = color_to_csa_sign(color);
+
+        if viewpoint.is_some_and(|viewpoint| viewpoint != color) {
+            return Some(match mv {
+                Move::Normal { to, .. } if self.inner.last_capture.is_some() => {
+                    format!("{}00{}{}ZZ", sign, to.file(), to.rank())
+                }
+                _ => format!("{}0000ZZ", sign),
+            });
+        }
 
         match mv {
             Move::Drop { piece, to } => {
@@ -273,13 +288,90 @@ impl GameApi {
         }
     }
 
-    pub(crate) fn sfen(&self) -> String {
-        denormalize_sfen_from_9x9(
-            &self.inner.to_sfen_owned(),
-            self.setting.files,
-            self.setting.ranks,
-        )
-        .unwrap_or_else(|_| self.inner.to_sfen_owned())
+    fn dark_shogi_visible_squares(&self, viewpoint: Color) -> Bitboard {
+        let mut position = self.position().clone();
+        position.side_to_move_set(viewpoint);
+        let visibility_setting = Setting {
+            is_tsuitate: false,
+            ..self.setting.clone()
+        };
+        let mut visible = position.player_bitboard(viewpoint) & self.setting.board_mask;
+        let mut pieces = visible;
+        while let Some(square) = pieces.pop() {
+            let Some(piece) = position.piece_at(square) else {
+                continue;
+            };
+            visible |= from_candidates(&position, piece, square, &visibility_setting);
+        }
+        visible & self.setting.board_mask
+    }
+
+    fn visible_board_sfen(&self, visible: Bitboard) -> String {
+        let mut board = String::new();
+        for rank in 1..=9 {
+            let mut vacant = 0u8;
+            for file in (1..=9).rev() {
+                let square = Square::new(file, rank).unwrap();
+                if !visible.contains(square) {
+                    if vacant > 0 {
+                        board.push_str(&vacant.to_string());
+                        vacant = 0;
+                    }
+                    board.push('?');
+                    continue;
+                }
+
+                match self.position().piece_at(square) {
+                    Some(piece) => {
+                        if vacant > 0 {
+                            board.push_str(&vacant.to_string());
+                            vacant = 0;
+                        }
+                        board.push_str(&piece_to_sfen(piece));
+                    }
+                    _ => vacant += 1,
+                }
+            }
+            if vacant > 0 {
+                board.push_str(&vacant.to_string());
+            }
+            if rank < 9 {
+                board.push('/');
+            }
+        }
+        board
+    }
+
+    pub(crate) fn sfen(&self, viewpoint: Option<Color>, is_dark_shogi: bool) -> String {
+        let sfen = if let Some(viewpoint) = viewpoint {
+            let mut position = self.position().clone();
+            if is_dark_shogi {
+                let visible = self.dark_shogi_visible_squares(viewpoint);
+                let board = self.visible_board_sfen(visible);
+                *position.hand_of_a_player_mut(viewpoint.flip()) = Hand::new();
+                let suffix_source = position.to_sfen_owned();
+                let suffix = suffix_source
+                    .split_once(' ')
+                    .map(|(_, suffix)| suffix)
+                    .unwrap_or("");
+                format!("{board} {suffix}")
+            } else {
+                for square in Square::all() {
+                    if position
+                        .piece_at(square)
+                        .is_some_and(|piece| piece.color() != viewpoint)
+                    {
+                        position.piece_set(square, None);
+                    }
+                }
+                *position.hand_of_a_player_mut(viewpoint.flip()) = Hand::new();
+                position.to_sfen_owned()
+            }
+        } else {
+            self.inner.to_sfen_owned()
+        };
+
+        denormalize_sfen_from_9x9(&sfen, self.setting.files, self.setting.ranks).unwrap_or(sfen)
     }
 
     pub(crate) fn fouls(&self) -> Vec<i8> {
@@ -493,6 +585,108 @@ mod tests {
         assert_eq!(
             game.action_index_to_csa_move(black_pawn_push).as_deref(),
             Some("+7776FU")
+        );
+    }
+
+    #[test]
+    fn sfen_hides_opponent_board_and_hand_for_viewpoint() {
+        let game = GameApi::new(
+            "sfen lnsgkgsnl/1r5b1/ppppppppp/9/9/9/PPPPPPPPP/1B5R1/LNSGKGSNL b Pp 1",
+            GameKind::Shogi.to_u8(),
+            false,
+            3,
+            9,
+            9,
+            150,
+            None,
+        )
+        .unwrap();
+
+        assert_eq!(
+            game.sfen(Some(Color::Black), false),
+            "9/9/9/9/9/9/PPPPPPPPP/1B5R1/LNSGKGSNL b P 1"
+        );
+        assert_eq!(
+            game.sfen(Some(Color::White), false),
+            "lnsgkgsnl/1r5b1/ppppppppp/9/9/9/9/9/9 b p 1"
+        );
+    }
+
+    #[test]
+    fn dark_shogi_sfen_marks_unseen_squares_and_reveals_attacks() {
+        let game = GameApi::new(
+            "sfen 9/9/9/9/9/4p4/9/4R4/4K4 b Pp 1",
+            GameKind::Shogi.to_u8(),
+            false,
+            3,
+            9,
+            9,
+            150,
+            None,
+        )
+        .unwrap();
+
+        assert_eq!(
+            game.sfen(Some(Color::Black), true),
+            "?????????/?????????/?????????/?????????/?????????/????p????/????1????/4R4/???1K1??? b P 1"
+        );
+    }
+
+    #[test]
+    fn new_treats_dark_shogi_unknown_squares_as_empty() {
+        let game = GameApi::new(
+            "sfen ?????????/?????????/?????????/?????????/?????????/????p????/????1????/4R4/???1K1??? b P 1",
+            GameKind::Shogi.to_u8(),
+            false,
+            3,
+            9,
+            9,
+            150,
+            None,
+        )
+        .unwrap();
+
+        assert_eq!(game.sfen(None, false), "9/9/9/9/9/4p4/9/4R4/4K4 b P 1");
+    }
+
+    #[test]
+    fn last_move_csa_hides_opponent_move_without_capture() {
+        let mut game = new_standard_game();
+        assert!(game.make_move("+7776FU"));
+
+        assert_eq!(
+            game.last_move_csa(Some(Color::Black)).as_deref(),
+            Some("+7776FU")
+        );
+        assert_eq!(
+            game.last_move_csa(Some(Color::White)).as_deref(),
+            Some("+0000ZZ")
+        );
+    }
+
+    #[test]
+    fn last_move_csa_reveals_only_destination_for_opponent_capture() {
+        let mut game = GameApi::new(
+            "sfen 9/9/9/9/9/9/9/9/9 w - 2",
+            GameKind::Shogi.to_u8(),
+            false,
+            3,
+            9,
+            9,
+            150,
+            None,
+        )
+        .unwrap();
+        game.inner.last_move = Some(Move::Normal {
+            from: Square::new(5, 9).unwrap(),
+            to: Square::new(5, 7).unwrap(),
+            promote: false,
+        });
+        game.inner.last_capture = Some(PieceKind::Pawn);
+
+        assert_eq!(
+            game.last_move_csa(Some(Color::White)).as_deref(),
+            Some("+0057ZZ")
         );
     }
 
