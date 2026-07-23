@@ -59,8 +59,11 @@ const OBS_LAST_CAPTURE_POSITION_CHANNEL: usize =
 const OBS_LAST_INFO_OFFSET: usize = OBS_LAST_CAPTURE_POSITION_CHANNEL + 1;
 const OBS_COLOR_CHANNEL: usize = OBS_LAST_INFO_OFFSET + 4;
 
-// (file_delta, rank_delta) for Black in [up, up-right, right, ..., left-up, knight right-up-up, knight left-up-up].
-const MOVE_DELTAS_BLACK: [(i8, i8); MOVE_ACTIONS] = [
+// (file_delta, rank_delta) from the moving side's viewpoint for Black:
+// [forward, forward-right, right, ..., left, forward-left,
+// knight forward-right, knight forward-left].
+// White uses the same action kinds rotated 180 degrees.
+const MOVE_DELTAS: [(i8, i8); MOVE_ACTIONS] = [
     (0, -1),
     (-1, -1),
     (-1, 0),
@@ -142,8 +145,8 @@ pub(crate) fn action_index_to_move(
     } else {
         action_kind
     };
-    let (base_df, base_dr) = *MOVE_DELTAS_BLACK.get(dir_idx)?;
-    let sign = 1;
+    let (base_df, base_dr) = *MOVE_DELTAS.get(dir_idx)?;
+    let sign = if side == Color::White { -1 } else { 1 };
     let move_file_delta = base_df * sign;
     let move_rank_delta = base_dr * sign;
     let scan_file_delta = -move_file_delta;
@@ -610,7 +613,7 @@ mod tests {
     fn action_index_to_move_decodes_white_pawn_push() {
         let mut game = new_standard_game();
         assert!(game.make_move("+7776FU"));
-        let idx = ((3 - 1) * 9 + (4 - 1)) * 27 + 4;
+        let idx = ((3 - 1) * 9 + (4 - 1)) * 27;
         let mv = action_index_to_move(game.position(), false, idx).expect("move should decode");
         assert_eq!(mv, csa_to_move("-3334FU", game.position()).unwrap());
     }
@@ -635,5 +638,28 @@ mod tests {
         assert_eq!(move_action_indices_to_square(7, 6), expected);
         assert!(move_action_indices_to_square(0, 6).is_empty());
         assert!(move_action_indices_to_square(7, 10).is_empty());
+    }
+
+    #[test]
+    fn action_index_to_move_decodes_white_knight_move() {
+        // 白桂: 8二 → 7四
+        let game = GameApi::new(
+            "4k4/1n7/9/9/9/9/9/9/4K4 w - 1",
+            GameKind::Shogi.to_u8(),
+            false,
+            3,
+            9,
+            9,
+            150,
+            None,
+        )
+        .unwrap();
+
+        // 7四への、白視点で左前へ跳ぶ桂馬の action
+        let idx = ((7 - 1) * 9 + (4 - 1)) * ACTIONS_PER_SQUARE + 9;
+
+        let mv = action_index_to_move(game.position(), false, idx).expect("move should decode");
+
+        assert_eq!(mv, csa_to_move("-8274KE", game.position()).unwrap());
     }
 }

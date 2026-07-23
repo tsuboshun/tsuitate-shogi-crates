@@ -565,7 +565,7 @@ mod tests {
     fn legal_action_indices_use_requested_color() {
         let game = new_standard_game();
         let black_pawn_push = ((7 - 1) * 9 + (6 - 1)) * 27;
-        let white_pawn_push = ((3 - 1) * 9 + (4 - 1)) * 27 + 4;
+        let white_pawn_push = ((3 - 1) * 9 + (4 - 1)) * 27;
 
         assert!(
             game.legal_action_indices(Color::Black)
@@ -694,7 +694,7 @@ mod tests {
     fn move_action_indices_to_returns_legal_normal_actions_for_current_state() {
         let mut game = new_standard_game();
         let black_pawn_push = ((7 - 1) * 9 + (6 - 1)) * 27;
-        let white_pawn_push = ((3 - 1) * 9 + (4 - 1)) * 27 + 4;
+        let white_pawn_push = ((3 - 1) * 9 + (4 - 1)) * 27;
 
         assert_eq!(game.move_action_indices_to(7, 6), vec![black_pawn_push]);
         assert!(game.move_action_indices_to(3, 4).is_empty());

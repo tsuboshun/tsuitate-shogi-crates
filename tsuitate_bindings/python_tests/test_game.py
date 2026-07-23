@@ -73,7 +73,7 @@ def test_from_candidates_returns_empty_for_invalid_input():
 def test_action_helpers_are_exposed():
     game = new_standard_game()
     black_pawn_push = ((7 - 1) * 9 + (6 - 1)) * 27
-    white_pawn_push = ((3 - 1) * 9 + (4 - 1)) * 27 + 4
+    white_pawn_push = ((3 - 1) * 9 + (4 - 1)) * 27
 
     assert game.king_position("+") == (5, 9)
     assert game.king_position("-") == (5, 1)
