@@ -1,7 +1,8 @@
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
-use pyo3::types::PyModule;
-use shogi_core::Color;
+use pyo3::types::{PyDict, PyModule};
+use shogi_core::{Color, PieceKind};
+use tsuitate_game::csa_to_piece_kind;
 
 use crate::game_api::{
     GameApi, INFO_CHECK, INFO_CHECKMATE, INFO_DRAW, INFO_FOUL, INFO_FOUL_UNDER_CHECK,
@@ -28,6 +29,17 @@ fn parse_optional_csa_color(csa_color: Option<&str>) -> PyResult<Option<Color>> 
             .ok_or_else(|| PyValueError::new_err("invalid color")),
         None => Ok(None),
     }
+}
+
+fn parse_excluded_piece_types(values: Option<Vec<String>>) -> PyResult<Vec<PieceKind>> {
+    values
+        .unwrap_or_default()
+        .into_iter()
+        .map(|value| {
+            csa_to_piece_kind(&value)
+                .map_err(|_| PyValueError::new_err(format!("invalid piece type: {value}")))
+        })
+        .collect()
 }
 
 #[pyclass(name = "Game")]
@@ -147,6 +159,80 @@ impl PyGame {
 
     fn move_action_indices_to(&self, file: u8, rank: u8) -> Vec<usize> {
         self.inner.move_action_indices_to(file, rank)
+    }
+
+    #[pyo3(signature = (
+        csa_color,
+        exclude_piece_types=None,
+        treat_friendly_target_as_empty=true
+    ))]
+    /// Count attacks by `csa_color` in SFEN board order (rank 1 first and
+    /// descending files within each rank).
+    ///
+    /// If `treat_friendly_target_as_empty` is true, friendly occupied squares
+    /// are counted as defended. Such pieces still block sliding attacks beyond
+    /// their squares. If it is false, every friendly occupied square has an
+    /// attack count of zero and still blocks sliding attacks beyond it.
+    fn attack_counts(
+        &self,
+        csa_color: &str,
+        exclude_piece_types: Option<Vec<String>>,
+        treat_friendly_target_as_empty: bool,
+    ) -> PyResult<Vec<u8>> {
+        let color =
+            parse_csa_color(csa_color).ok_or_else(|| PyValueError::new_err("invalid color"))?;
+        let excluded_piece_types = parse_excluded_piece_types(exclude_piece_types)?;
+        Ok(self
+            .inner
+            .attack_counts(color, &excluded_piece_types, treat_friendly_target_as_empty))
+    }
+
+    #[pyo3(signature = (
+        csa_color,
+        moves,
+        include_attack_counts=true,
+        exclude_piece_types=None,
+        treat_friendly_target_as_empty=true
+    ))]
+    /// Apply every CSA move to an independent clone and return all results.
+    /// Invalid moves report the unchanged clone's state. For included attack
+    /// counts, `treat_friendly_target_as_empty` has the same meaning as in
+    /// `attack_counts`: friendly occupied squares are counted as defended but
+    /// still block sliding attacks beyond them when true; when false, their
+    /// attack counts are zero. They block sliding attacks in either case.
+    fn analyze_moves(
+        &self,
+        py: Python<'_>,
+        csa_color: &str,
+        moves: Vec<String>,
+        include_attack_counts: bool,
+        exclude_piece_types: Option<Vec<String>>,
+        treat_friendly_target_as_empty: bool,
+    ) -> PyResult<Vec<Py<PyDict>>> {
+        let color =
+            parse_csa_color(csa_color).ok_or_else(|| PyValueError::new_err("invalid color"))?;
+        let excluded_piece_types = parse_excluded_piece_types(exclude_piece_types)?;
+        self.inner
+            .analyze_moves(
+                &moves,
+                color,
+                include_attack_counts,
+                &excluded_piece_types,
+                treat_friendly_target_as_empty,
+            )
+            .into_iter()
+            .map(|result| {
+                let dict = PyDict::new(py);
+                dict.set_item("move", result.csa_move)?;
+                dict.set_item("valid", result.valid)?;
+                dict.set_item("last_info", result.last_info)?;
+                dict.set_item("last_capture", result.last_capture)?;
+                dict.set_item("sfen", result.sfen)?;
+                dict.set_item("fouls", result.fouls)?;
+                dict.set_item("attack_counts", result.attack_counts)?;
+                Ok(dict.unbind())
+            })
+            .collect()
     }
 
     #[pyo3(name = "move_action_indices_to_square")]

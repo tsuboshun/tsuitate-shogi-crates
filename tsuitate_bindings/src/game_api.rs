@@ -1,7 +1,9 @@
 use std::fmt;
 
 use shogi_core::{Bitboard, Color, Hand, Move, PartialPosition, Piece, PieceKind, Square, ToUsi};
-use shogi_legality_extended::{GameKind, Setting, from_candidates, is_valid};
+use shogi_legality_extended::{
+    GameKind, Setting, from_candidates, from_candidates_without_assertion, is_valid,
+};
 use shogi_usi_parser::FromUsi;
 use tsuitate_game::{Game, Info, csa_to_move, csa_to_piece_kind, nth_ascii};
 
@@ -93,9 +95,21 @@ fn piece_to_sfen(piece: Piece) -> String {
     buf
 }
 
+#[derive(Clone)]
 pub(crate) struct GameApi {
     inner: Game,
     setting: Setting,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct MoveAnalysis {
+    pub(crate) csa_move: String,
+    pub(crate) valid: bool,
+    pub(crate) last_info: Option<u8>,
+    pub(crate) last_capture: Option<String>,
+    pub(crate) sfen: String,
+    pub(crate) fouls: (i8, i8),
+    pub(crate) attack_counts: Option<Vec<u8>>,
 }
 
 impl GameApi {
@@ -378,6 +392,10 @@ impl GameApi {
         self.inner.fouls.iter().map(|foul| *foul as i8).collect()
     }
 
+    fn fouls_tuple(&self) -> (i8, i8) {
+        (self.inner.fouls[0], self.inner.fouls[1])
+    }
+
     pub(crate) fn set_fouls(&mut self, foul0: i8, foul1: i8) {
         self.inner.fouls[0] = foul0;
         self.inner.fouls[1] = foul1;
@@ -393,6 +411,98 @@ impl GameApi {
             pk.to_usi(&mut buf).unwrap();
             buf
         })
+    }
+
+    /// Returns attack counts in SFEN board order: rank 1 to rank N, and within
+    /// each rank file N to file 1.
+    ///
+    /// When `treat_friendly_target_as_empty` is `true`, a square occupied by a
+    /// friendly piece is treated as empty only when deciding whether that
+    /// square itself is attacked. The piece still blocks attacks beyond it, so
+    /// a friendly piece on a rook, bishop, or lance ray remains an obstacle.
+    /// When it is `false`, every square occupied by a friendly piece has an
+    /// attack count of zero; friendly pieces still block attacks beyond them.
+    pub(crate) fn attack_counts(
+        &self,
+        color: Color,
+        excluded_piece_types: &[PieceKind],
+        treat_friendly_target_as_empty: bool,
+    ) -> Vec<u8> {
+        let mut target_position = self.position().clone();
+        if treat_friendly_target_as_empty {
+            for square in Square::all() {
+                if target_position
+                    .piece_at(square)
+                    .is_some_and(|piece| piece.color() == color)
+                {
+                    target_position.piece_set(square, None);
+                }
+            }
+        }
+
+        let occupied = if self.setting.is_tsuitate {
+            self.position().player_bitboard(color)
+        } else {
+            !self.position().vacant_bitboard()
+        };
+        let mut counts = vec![0u8; self.setting.files as usize * self.setting.ranks as usize];
+        let mut pieces = self.position().player_bitboard(color) & self.setting.board_mask;
+        while let Some(from) = pieces.pop() {
+            let Some(piece) = self.position().piece_at(from) else {
+                continue;
+            };
+            if excluded_piece_types.contains(&piece.piece_kind()) {
+                continue;
+            }
+            let mut attacks = from_candidates_without_assertion(
+                occupied,
+                &target_position,
+                piece,
+                from.file(),
+                from.rank(),
+                self.setting.game_kind,
+            ) & self.setting.board_mask;
+
+            while let Some(square) = attacks.pop() {
+                let index = (square.rank() as usize - 1) * self.setting.files as usize
+                    + (self.setting.files - square.file()) as usize;
+                counts[index] += 1;
+            }
+        }
+        counts
+    }
+
+    pub(crate) fn analyze_moves(
+        &self,
+        moves: &[String],
+        attack_color: Color,
+        include_attack_counts: bool,
+        excluded_piece_types: &[PieceKind],
+        treat_friendly_target_as_empty: bool,
+    ) -> Vec<MoveAnalysis> {
+        moves
+            .iter()
+            .map(|csa_move| {
+                let mut game = self.clone();
+                let valid = game.make_move(csa_move);
+                let attack_counts = include_attack_counts.then(|| {
+                    game.attack_counts(
+                        attack_color,
+                        excluded_piece_types,
+                        treat_friendly_target_as_empty,
+                    )
+                });
+                MoveAnalysis {
+                    csa_move: csa_move.clone(),
+                    valid,
+                    last_info: game.last_info(),
+                    last_capture: game.last_capture(),
+                    sfen: game.sfen(None, false),
+                    fouls: game.fouls_tuple(),
+                    attack_counts,
+                }
+            })
+            .collect()
     }
 
     pub(crate) fn is_valid(&self, csa_move: &str, is_tsuitate: bool) -> bool {
@@ -733,5 +843,53 @@ mod tests {
         );
 
         assert!(matches!(result, Err(GameApiError::InvalidLastInfo)));
+    }
+
+    #[test]
+    fn attack_counts_can_include_friendly_occupied_targets() {
+        let game = GameApi::new(
+            "sfen 9/9/9/9/9/4P4/9/4R4/9 b - 1",
+            GameKind::Shogi.to_u8(),
+            false,
+            3,
+            9,
+            9,
+            150,
+            None,
+        )
+        .unwrap();
+        let index = |file: usize, rank: usize| (rank - 1) * 9 + (9 - file);
+
+        let counts = game.attack_counts(Color::Black, &[], true);
+        assert_eq!(counts.len(), 81);
+        assert_eq!(counts[index(5, 7)], 1);
+        assert_eq!(counts[index(5, 6)], 1);
+        assert_eq!(counts[index(5, 5)], 1); // the pawn attacks this square
+
+        let counts = game.attack_counts(Color::Black, &[], false);
+        assert_eq!(counts[index(5, 6)], 0);
+
+        let counts = game.attack_counts(Color::Black, &[PieceKind::Rook], true);
+        assert_eq!(counts[index(5, 7)], 0);
+        assert_eq!(counts[index(5, 5)], 1);
+    }
+
+    #[test]
+    fn analyze_moves_evaluates_independent_clones() {
+        let game = new_standard_game();
+        let original_sfen = game.sfen(None, false);
+        let moves = vec!["+7776FU".to_owned(), "+7775FU".to_owned()];
+
+        let results = game.analyze_moves(&moves, Color::Black, true, &[], true);
+
+        assert_eq!(results.len(), 2);
+        assert!(results[0].valid);
+        assert_eq!(results[0].last_info, Some(INFO_NONE));
+        assert_eq!(results[0].fouls, (9, 9));
+        assert_eq!(results[0].attack_counts.as_ref().unwrap().len(), 81);
+        assert!(!results[1].valid);
+        assert_eq!(results[1].sfen, original_sfen);
+        assert_eq!(game.sfen(None, false), original_sfen);
+        assert_eq!(game.last_move(), None);
     }
 }

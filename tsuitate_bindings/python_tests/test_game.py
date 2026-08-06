@@ -110,3 +110,62 @@ def test_info_constants_are_exported():
     assert tb.INFO_NONE == 0
     assert tb.INFO_FOUL == 1
     assert tb.INFO_DRAW == 6
+
+
+def test_attack_counts_supports_friendly_targets_and_exclusions():
+    game = tb.Game("sfen 9/9/9/9/9/4P4/9/4R4/9 b - 1", 1, False, 3, 9, 9, 150)
+    index = lambda file, rank: (rank - 1) * 9 + (9 - file)
+
+    counts = game.attack_counts(
+        "+", exclude_piece_types=["OU"], treat_friendly_target_as_empty=True
+    )
+    assert len(counts) == 81
+    assert counts[index(5, 7)] == 1
+    assert counts[index(5, 6)] == 1
+
+    assert game.attack_counts(
+        "+", treat_friendly_target_as_empty=False
+    )[index(5, 6)] == 0
+    assert game.attack_counts("+", exclude_piece_types=["HI"])[index(5, 7)] == 0
+
+    with pytest.raises(ValueError):
+        game.attack_counts("*")
+    with pytest.raises(ValueError):
+        game.attack_counts("+", exclude_piece_types=["XX"])
+
+
+def test_analyze_moves_returns_batch_results_without_mutating_game():
+    game = new_standard_game()
+    original_sfen = game.sfen
+
+    results = game.analyze_moves(
+        "+", ["+7776FU", "+7775FU"], include_attack_counts=True
+    )
+
+    assert [result["move"] for result in results] == ["+7776FU", "+7775FU"]
+    assert results[0]["valid"] is True
+    assert results[0]["last_info"] == tb.INFO_NONE
+    assert results[0]["last_capture"] is None
+    assert results[0]["fouls"] == (9, 9)
+    assert len(results[0]["attack_counts"]) == 81
+    assert results[1]["valid"] is False
+    assert results[1]["sfen"] == original_sfen
+    assert game.sfen == original_sfen
+    assert game.last_move is None
+
+
+def test_analyze_moves_can_skip_attack_counts():
+    result = new_standard_game().analyze_moves(
+        "+", ["+7776FU"], include_attack_counts=False
+    )[0]
+
+    assert result["attack_counts"] is None
+
+
+def test_analyze_moves_reports_captured_piece():
+    game = tb.Game("sfen 9/9/9/9/9/9/4p4/4R4/9 b - 1", 1, False, 3, 9, 9, 150)
+
+    result = game.analyze_moves("+", ["+5857HI"], include_attack_counts=False)[0]
+
+    assert result["valid"] is True
+    assert result["last_capture"] == "P"
