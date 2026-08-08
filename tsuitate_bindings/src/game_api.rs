@@ -428,6 +428,21 @@ impl GameApi {
         excluded_piece_types: &[PieceKind],
         treat_friendly_target_as_empty: bool,
     ) -> Vec<u8> {
+        self.attack_counts_with_tsuitate_setting(
+            color,
+            excluded_piece_types,
+            treat_friendly_target_as_empty,
+            self.setting.is_tsuitate,
+        )
+    }
+
+    fn attack_counts_with_tsuitate_setting(
+        &self,
+        color: Color,
+        excluded_piece_types: &[PieceKind],
+        treat_friendly_target_as_empty: bool,
+        is_tsuitate: bool,
+    ) -> Vec<u8> {
         let mut target_position = self.position().clone();
         if treat_friendly_target_as_empty {
             for square in Square::all() {
@@ -440,7 +455,7 @@ impl GameApi {
             }
         }
 
-        let occupied = if self.setting.is_tsuitate {
+        let occupied = if is_tsuitate {
             self.position().player_bitboard(color)
         } else {
             !self.position().vacant_bitboard()
@@ -486,10 +501,11 @@ impl GameApi {
                 let mut game = self.clone();
                 let valid = game.make_move(csa_move);
                 let attack_counts = include_attack_counts.then(|| {
-                    game.attack_counts(
+                    game.attack_counts_with_tsuitate_setting(
                         attack_color,
                         excluded_piece_types,
                         treat_friendly_target_as_empty,
+                        false,
                     )
                 });
                 MoveAnalysis {
@@ -891,5 +907,31 @@ mod tests {
         assert_eq!(results[1].sfen, original_sfen);
         assert_eq!(game.sfen(None, false), original_sfen);
         assert_eq!(game.last_move(), None);
+    }
+
+    #[test]
+    fn analyze_moves_calculates_attacks_as_a_normal_board() {
+        let game = GameApi::new(
+            "sfen 9/9/9/4p4/9/9/P8/4R4/9 b - 1",
+            GameKind::Shogi.to_u8(),
+            true,
+            3,
+            9,
+            9,
+            150,
+            None,
+        )
+        .unwrap();
+        let index = |file: usize, rank: usize| (rank - 1) * 9 + (9 - file);
+
+        let tsuitate_counts = game.attack_counts(Color::Black, &[], true);
+        assert_eq!(tsuitate_counts[index(5, 3)], 1);
+
+        let results = game.analyze_moves(&["+9796FU".to_owned()], Color::Black, true, &[], true);
+        let counts = results[0].attack_counts.as_ref().unwrap();
+
+        assert!(results[0].valid);
+        assert_eq!(counts[index(5, 4)], 1);
+        assert_eq!(counts[index(5, 3)], 0);
     }
 }
