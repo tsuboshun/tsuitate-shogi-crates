@@ -95,6 +95,38 @@ fn piece_to_sfen(piece: Piece) -> String {
     buf
 }
 
+#[inline]
+fn is_sliding_piece(piece_kind: PieceKind) -> bool {
+    matches!(
+        piece_kind,
+        PieceKind::Lance
+            | PieceKind::Bishop
+            | PieceKind::Rook
+            | PieceKind::ProBishop
+            | PieceKind::ProRook
+    )
+}
+
+/// Returns the squares whose file and rank are both within `max_distance` of
+/// `from`. `max_distance` must be less than 8.
+#[inline]
+fn sliding_distance_mask(from: Square, max_distance: u8) -> Bitboard {
+    debug_assert!(max_distance < 8);
+
+    let min_file = from.file().saturating_sub(max_distance).max(1);
+    let max_file = from.file().saturating_add(max_distance).min(9);
+    let min_rank = from.rank().saturating_sub(max_distance).max(1);
+    let max_rank = from.rank().saturating_add(max_distance).min(9);
+    let rank_pattern = ((1u16 << (max_rank - min_rank + 1)) - 1) << (min_rank - 1);
+    let mut mask = Bitboard::empty();
+    for file in min_file..=max_file {
+        // Safety: the bounds above keep `file` in 1..=9 and `rank_pattern`
+        // within the low nine bits.
+        mask |= unsafe { Bitboard::from_file_unchecked(file, rank_pattern) };
+    }
+    mask
+}
+
 #[derive(Clone)]
 pub(crate) struct GameApi {
     inner: Game,
@@ -425,13 +457,13 @@ impl GameApi {
     pub(crate) fn attack_counts(
         &self,
         color: Color,
-        excluded_piece_types: &[PieceKind],
         treat_friendly_target_as_empty: bool,
+        max_sliding_distance: Option<u8>,
     ) -> Vec<u8> {
         self.attack_counts_with_tsuitate_setting(
             color,
-            excluded_piece_types,
             treat_friendly_target_as_empty,
+            max_sliding_distance,
             self.setting.is_tsuitate,
         )
     }
@@ -439,8 +471,8 @@ impl GameApi {
     fn attack_counts_with_tsuitate_setting(
         &self,
         color: Color,
-        excluded_piece_types: &[PieceKind],
         treat_friendly_target_as_empty: bool,
+        max_sliding_distance: Option<u8>,
         is_tsuitate: bool,
     ) -> Vec<u8> {
         let mut target_position = self.position().clone();
@@ -466,9 +498,6 @@ impl GameApi {
             let Some(piece) = self.position().piece_at(from) else {
                 continue;
             };
-            if excluded_piece_types.contains(&piece.piece_kind()) {
-                continue;
-            }
             let mut attacks = from_candidates_without_assertion(
                 occupied,
                 &target_position,
@@ -477,6 +506,13 @@ impl GameApi {
                 from.rank(),
                 self.setting.game_kind,
             ) & self.setting.board_mask;
+
+            if let Some(max_distance) = max_sliding_distance
+                && max_distance < 8
+                && is_sliding_piece(piece.piece_kind())
+            {
+                attacks &= sliding_distance_mask(from, max_distance);
+            }
 
             while let Some(square) = attacks.pop() {
                 let index = (square.rank() as usize - 1) * self.setting.files as usize
@@ -492,8 +528,8 @@ impl GameApi {
         moves: &[String],
         attack_color: Color,
         include_attack_counts: bool,
-        excluded_piece_types: &[PieceKind],
         treat_friendly_target_as_empty: bool,
+        max_sliding_distance: Option<u8>,
     ) -> Vec<MoveAnalysis> {
         moves
             .iter()
@@ -503,8 +539,8 @@ impl GameApi {
                 let attack_counts = include_attack_counts.then(|| {
                     game.attack_counts_with_tsuitate_setting(
                         attack_color,
-                        excluded_piece_types,
                         treat_friendly_target_as_empty,
+                        max_sliding_distance,
                         false,
                     )
                 });
@@ -876,18 +912,31 @@ mod tests {
         .unwrap();
         let index = |file: usize, rank: usize| (rank - 1) * 9 + (9 - file);
 
-        let counts = game.attack_counts(Color::Black, &[], true);
+        let counts = game.attack_counts(Color::Black, true, None);
         assert_eq!(counts.len(), 81);
         assert_eq!(counts[index(5, 7)], 1);
         assert_eq!(counts[index(5, 6)], 1);
         assert_eq!(counts[index(5, 5)], 1); // the pawn attacks this square
 
-        let counts = game.attack_counts(Color::Black, &[], false);
+        let counts = game.attack_counts(Color::Black, false, None);
         assert_eq!(counts[index(5, 6)], 0);
+    }
 
-        let counts = game.attack_counts(Color::Black, &[PieceKind::Rook], true);
-        assert_eq!(counts[index(5, 7)], 0);
-        assert_eq!(counts[index(5, 5)], 1);
+    #[test]
+    fn sliding_distance_mask_matches_chebyshev_distance() {
+        for from in Square::all() {
+            for max_distance in 0..8 {
+                let mask = sliding_distance_mask(from, max_distance);
+                for target in Square::all() {
+                    let expected = from
+                        .file()
+                        .abs_diff(target.file())
+                        .max(from.rank().abs_diff(target.rank()))
+                        <= max_distance;
+                    assert_eq!(mask.contains(target), expected, "{from:?}, {target:?}");
+                }
+            }
+        }
     }
 
     #[test]
@@ -896,7 +945,7 @@ mod tests {
         let original_sfen = game.sfen(None, false);
         let moves = vec!["+7776FU".to_owned(), "+7775FU".to_owned()];
 
-        let results = game.analyze_moves(&moves, Color::Black, true, &[], true);
+        let results = game.analyze_moves(&moves, Color::Black, true, true, None);
 
         assert_eq!(results.len(), 2);
         assert!(results[0].valid);
@@ -924,10 +973,10 @@ mod tests {
         .unwrap();
         let index = |file: usize, rank: usize| (rank - 1) * 9 + (9 - file);
 
-        let tsuitate_counts = game.attack_counts(Color::Black, &[], true);
+        let tsuitate_counts = game.attack_counts(Color::Black, true, None);
         assert_eq!(tsuitate_counts[index(5, 3)], 1);
 
-        let results = game.analyze_moves(&["+9796FU".to_owned()], Color::Black, true, &[], true);
+        let results = game.analyze_moves(&["+9796FU".to_owned()], Color::Black, true, true, None);
         let counts = results[0].attack_counts.as_ref().unwrap();
 
         assert!(results[0].valid);

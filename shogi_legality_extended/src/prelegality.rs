@@ -35,9 +35,9 @@ pub fn is_valid(position: &PartialPosition, mv: Move, setting: &Setting) -> bool
                     return false;
                 }
                 // Capturing king is not allowed.
-                // if x.piece_kind() == PieceKind::King {
-                //     return false;
-                // }
+                if !setting.is_tsuitate && x.piece_kind() == PieceKind::King {
+                    return false;
+                }
             }
             // Stuck?
             let rel_rank = relative_rank(to, side, &setting);
@@ -74,6 +74,10 @@ pub fn is_valid(position: &PartialPosition, mv: Move, setting: &Setting) -> bool
             normal::check(position, from_piece, from, to, &setting)
         }
         Move::Drop { piece, to } => {
+            // Is the destination within the board?
+            if !setting.board_mask.contains(to) {
+                return false;
+            }
             // Does `side` have a piece?
             if piece.color() != side {
                 return false;
@@ -122,18 +126,16 @@ pub fn is_valid(position: &PartialPosition, mv: Move, setting: &Setting) -> bool
                 let mut next = position.clone();
                 let result = next.make_move(mv); // always Some(())
                 debug_assert_eq!(result, Some(()));
-                if is_mate(&next, &setting) == Some(true) {
+                if is_mate_after_pawn_drop(&next, setting) == Some(true) {
                     return false;
                 }
             }
-            // Is the destination within the board?
-            return setting.board_mask.contains(to);
+            true
         }
     }
 }
 
-/// Returns all valid moves without considering king's safety.
-pub fn all_valid_moves<'a>(
+fn all_valid_normal_moves<'a>(
     position: &'a PartialPosition,
     setting: &'a Setting,
 ) -> impl Iterator<Item = Move> + 'a {
@@ -145,6 +147,15 @@ pub fn all_valid_moves<'a>(
                     .map(move |promote| Move::Normal { from, to, promote })
             })
         })
+        .filter(|&mv| is_valid(position, mv, setting))
+}
+
+/// Returns all valid moves without considering king's safety.
+pub fn all_valid_moves<'a>(
+    position: &'a PartialPosition,
+    setting: &'a Setting,
+) -> impl Iterator<Item = Move> + 'a {
+    all_valid_normal_moves(position, setting)
         .chain(
             Piece::all()
                 .into_iter()
@@ -244,6 +255,28 @@ pub fn will_king_be_captured(
     Some(false)
 }
 
+/// Checks whether a pawn drop checkmates the opponent.
+///
+/// Since a pawn gives check from an adjacent square, a drop cannot block that
+/// check. Only normal moves need to be considered as possible responses. This
+/// also avoids the `is_valid` -> `is_mate` -> `is_valid` recursion.
+fn is_mate_after_pawn_drop(position: &PartialPosition, setting: &Setting) -> Option<bool> {
+    position.king_position(position.side_to_move())?;
+
+    if !will_king_be_captured(position, position.side_to_move().flip(), setting.game_kind)? {
+        return Some(false);
+    }
+    for mv in all_valid_normal_moves(position, setting) {
+        let mut next = position.clone();
+        let result = next.make_move(mv);
+        debug_assert_eq!(result, Some(()));
+        if !will_king_be_captured(&next, next.side_to_move(), setting.game_kind)? {
+            return Some(false);
+        }
+    }
+    Some(true)
+}
+
 /// Checks if `side`'s king has no way to escape from being captured.
 ///
 /// This function returns None if `side` has no king.
@@ -253,14 +286,9 @@ pub fn will_king_be_captured(
 /// Since: 0.1.2
 pub fn is_mate(position: &PartialPosition, setting: &Setting) -> Option<bool> {
     position.king_position(position.side_to_move())?; // Early return if no king.
-    let setting = Setting::new(
-        setting.files,
-        setting.ranks,
-        setting.promotion_rank,
-        setting.game_kind,
-        false,
-    );
-    let all = all_valid_moves(position, &setting);
+    let mut response_setting = setting.clone();
+    response_setting.is_tsuitate = false;
+    let all = all_valid_moves(position, &response_setting);
 
     if !will_king_be_captured(&position, position.side_to_move().flip(), setting.game_kind)? {
         return Some(false);
@@ -293,5 +321,42 @@ mod tests {
             to: Square::SQ_1C,
         };
         assert!(is_valid(&position, mv, &setting));
+    }
+
+    #[test]
+    fn drop_pawn_mate_is_invalid() {
+        let setting = Setting::new(9, 9, 3, GameKind::Shogi, false);
+        let position = PartialPosition::from_usi("sfen 8k/7R1/7G1/9/9/9/9/9/K8 b P 1").unwrap();
+        let mv = Move::Drop {
+            piece: Piece::new(PieceKind::Pawn, Color::Black),
+            to: Square::SQ_1B,
+        };
+
+        assert!(!is_valid(&position, mv, &setting));
+    }
+
+    #[test]
+    fn mate_after_3957_pro_bishop_does_not_recurse_through_pawn_drops() {
+        let setting = Setting::new(9, 9, 3, GameKind::Shogi, true);
+        let mut position = PartialPosition::from_usi(
+            "sfen 6knl/4G4/3pgppSp/3+b1n+S2/+SN5P1/l1PKN2G1/1P1PP3P/3g3+sL/2+r1r1b2 w L5P2p 112",
+        )
+        .unwrap();
+        let mv = Move::Normal {
+            from: Square::SQ_3I,
+            to: Square::SQ_5G,
+            promote: false,
+        };
+        position.make_move(mv).unwrap();
+
+        assert_eq!(is_mate(&position, &setting), Some(true));
+    }
+
+    #[test]
+    fn mate_responses_use_non_tsuitate_legality() {
+        let setting = Setting::new(1, 2, 1, GameKind::Shogi, true);
+        let position = PartialPosition::from_usi("sfen 8k/8K/9/9/9/9/9/9/9 b - 1").unwrap();
+
+        assert_eq!(is_mate(&position, &setting), Some(true));
     }
 }

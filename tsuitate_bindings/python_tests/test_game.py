@@ -112,13 +112,11 @@ def test_info_constants_are_exported():
     assert tb.INFO_DRAW == 6
 
 
-def test_attack_counts_supports_friendly_targets_and_exclusions():
+def test_attack_counts_supports_friendly_targets():
     game = tb.Game("sfen 9/9/9/9/9/4P4/9/4R4/9 b - 1", 1, False, 3, 9, 9, 150)
     index = lambda file, rank: (rank - 1) * 9 + (9 - file)
 
-    counts = game.attack_counts(
-        "+", exclude_piece_types=["OU"], treat_friendly_target_as_empty=True
-    )
+    counts = game.attack_counts("+", treat_friendly_target_as_empty=True)
     assert len(counts) == 81
     assert counts[index(5, 7)] == 1
     assert counts[index(5, 6)] == 1
@@ -126,12 +124,42 @@ def test_attack_counts_supports_friendly_targets_and_exclusions():
     assert game.attack_counts(
         "+", treat_friendly_target_as_empty=False
     )[index(5, 6)] == 0
-    assert game.attack_counts("+", exclude_piece_types=["HI"])[index(5, 7)] == 0
 
     with pytest.raises(ValueError):
         game.attack_counts("*")
-    with pytest.raises(ValueError):
-        game.attack_counts("+", exclude_piece_types=["XX"])
+
+
+@pytest.mark.parametrize(
+    ("piece", "near", "far"),
+    [
+        ("R", (5, 4), (5, 3)),
+        ("B", (4, 4), (3, 3)),
+        ("+R", (5, 4), (5, 3)),
+        ("+B", (4, 4), (3, 3)),
+        ("L", (5, 4), (5, 3)),
+    ],
+)
+def test_attack_counts_can_limit_sliding_piece_distance(piece, near, far):
+    game = tb.Game(
+        f"sfen 9/9/9/9/4{piece}4/9/9/9/9 b - 1", 1, False, 3, 9, 9, 150
+    )
+    index = lambda file, rank: (rank - 1) * 9 + (9 - file)
+
+    unlimited = game.attack_counts("+")
+    limited = game.attack_counts("+", max_sliding_distance=1)
+    zero = game.attack_counts("+", max_sliding_distance=0)
+
+    assert unlimited[index(*far)] == 1
+    assert limited[index(*near)] == 1
+    assert limited[index(*far)] == 0
+    assert zero[index(*near)] == 0
+
+
+def test_attack_counts_distance_limit_does_not_affect_short_range_pieces():
+    game = tb.Game("sfen 9/9/9/9/4P4/9/9/9/9 b - 1", 1, False, 3, 9, 9, 150)
+    index = lambda file, rank: (rank - 1) * 9 + (9 - file)
+
+    assert game.attack_counts("+", max_sliding_distance=0)[index(5, 4)] == 1
 
 
 def test_analyze_moves_returns_batch_results_without_mutating_game():
@@ -160,6 +188,19 @@ def test_analyze_moves_can_skip_attack_counts():
     )[0]
 
     assert result["attack_counts"] is None
+
+
+def test_analyze_moves_can_limit_sliding_piece_distance():
+    game = tb.Game("sfen 9/9/9/9/4R4/9/9/9/9 b - 1", 1, False, 3, 9, 9, 150)
+    index = lambda file, rank: (rank - 1) * 9 + (9 - file)
+
+    result = game.analyze_moves(
+        "+", ["+5554HI"], max_sliding_distance=1
+    )[0]
+
+    assert result["valid"] is True
+    assert result["attack_counts"][index(5, 3)] == 1
+    assert result["attack_counts"][index(5, 2)] == 0
 
 
 def test_analyze_moves_reports_captured_piece():
