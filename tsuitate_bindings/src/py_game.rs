@@ -2,28 +2,13 @@ use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyModule};
 use shogi_core::Color;
+use tsuitate_game::{Info, color_to_csa_sign, csa_color_to_color};
 
-use crate::game_api::{
-    GameApi, INFO_CHECK, INFO_CHECKMATE, INFO_DRAW, INFO_FOUL, INFO_FOUL_UNDER_CHECK,
-    INFO_LOSS_BY_FOUL, INFO_NONE,
-};
-
-fn parse_csa_color(csa_color: &str) -> Option<Color> {
-    let mut chars = csa_color.chars();
-    let color = match chars.next()? {
-        '+' => Color::Black,
-        '-' => Color::White,
-        _ => return None,
-    };
-    if chars.next().is_some() {
-        return None;
-    }
-    Some(color)
-}
+use crate::game_api::GameApi;
 
 fn parse_optional_csa_color(csa_color: Option<&str>) -> PyResult<Option<Color>> {
     match csa_color {
-        Some(value) => parse_csa_color(value)
+        Some(value) => csa_color_to_color(value)
             .map(Some)
             .ok_or_else(|| PyValueError::new_err("invalid color")),
         None => Ok(None),
@@ -103,7 +88,7 @@ impl PyGame {
 
     #[getter]
     fn last_info(&self) -> Option<u8> {
-        self.inner.last_info()
+        self.inner.last_info().map(|info| info as u8)
     }
 
     #[getter]
@@ -132,11 +117,11 @@ impl PyGame {
     }
 
     fn king_position(&self, csa_color: &str) -> Option<(u8, u8)> {
-        parse_csa_color(csa_color).and_then(|color| self.inner.king_position(color))
+        csa_color_to_color(csa_color).and_then(|color| self.inner.king_position(color))
     }
 
     fn legal_action_indices(&self, csa_color: &str) -> Vec<usize> {
-        parse_csa_color(csa_color)
+        csa_color_to_color(csa_color)
             .map(|color| self.inner.legal_action_indices(color))
             .unwrap_or_default()
     }
@@ -147,81 +132,6 @@ impl PyGame {
 
     fn move_action_indices_to(&self, file: u8, rank: u8) -> Vec<usize> {
         self.inner.move_action_indices_to(file, rank)
-    }
-
-    #[pyo3(signature = (
-        csa_color,
-        treat_friendly_target_as_empty=true,
-        max_sliding_distance=None
-    ))]
-    /// Count attacks by `csa_color` in SFEN board order (rank 1 first and
-    /// descending files within each rank).
-    ///
-    /// If `treat_friendly_target_as_empty` is true, friendly occupied squares
-    /// are counted as defended. Such pieces still block sliding attacks beyond
-    /// their squares. If it is false, every friendly occupied square has an
-    /// attack count of zero and still blocks sliding attacks beyond it.
-    /// `max_sliding_distance` limits each rook, bishop, promoted rook,
-    /// promoted bishop, and lance direction to at most that many squares.
-    fn attack_counts(
-        &self,
-        csa_color: &str,
-        treat_friendly_target_as_empty: bool,
-        max_sliding_distance: Option<u8>,
-    ) -> PyResult<Vec<u8>> {
-        let color =
-            parse_csa_color(csa_color).ok_or_else(|| PyValueError::new_err("invalid color"))?;
-        Ok(self
-            .inner
-            .attack_counts(color, treat_friendly_target_as_empty, max_sliding_distance))
-    }
-
-    #[pyo3(signature = (
-        csa_color,
-        moves,
-        include_attack_counts=true,
-        treat_friendly_target_as_empty=true,
-        max_sliding_distance=None
-    ))]
-    /// Apply every CSA move to an independent clone and return all results.
-    /// Invalid moves report the unchanged clone's state. For included attack
-    /// counts, `treat_friendly_target_as_empty` has the same meaning as in
-    /// `attack_counts`: friendly occupied squares are counted as defended but
-    /// still block sliding attacks beyond them when true; when false, their
-    /// attack counts are zero. They block sliding attacks in either case.
-    /// `max_sliding_distance` also has the same meaning as in `attack_counts`.
-    fn analyze_moves(
-        &self,
-        py: Python<'_>,
-        csa_color: &str,
-        moves: Vec<String>,
-        include_attack_counts: bool,
-        treat_friendly_target_as_empty: bool,
-        max_sliding_distance: Option<u8>,
-    ) -> PyResult<Vec<Py<PyDict>>> {
-        let color =
-            parse_csa_color(csa_color).ok_or_else(|| PyValueError::new_err("invalid color"))?;
-        self.inner
-            .analyze_moves(
-                &moves,
-                color,
-                include_attack_counts,
-                treat_friendly_target_as_empty,
-                max_sliding_distance,
-            )
-            .into_iter()
-            .map(|result| {
-                let dict = PyDict::new(py);
-                dict.set_item("move", result.csa_move)?;
-                dict.set_item("valid", result.valid)?;
-                dict.set_item("last_info", result.last_info)?;
-                dict.set_item("last_capture", result.last_capture)?;
-                dict.set_item("sfen", result.sfen)?;
-                dict.set_item("fouls", result.fouls)?;
-                dict.set_item("attack_counts", result.attack_counts)?;
-                Ok(dict.unbind())
-            })
-            .collect()
     }
 
     #[pyo3(name = "move_action_indices_to_square")]
@@ -237,13 +147,10 @@ impl PyGame {
         is_tsuitate: bool,
         ignore_turn: bool,
     ) -> Vec<String> {
-        let Some(color) = parse_csa_color(csa_color) else {
+        let Some(color) = csa_color_to_color(csa_color) else {
             return Vec::new();
         };
-        let csa_color = match color {
-            Color::Black => '+',
-            Color::White => '-',
-        };
+        let csa_color = color_to_csa_sign(color);
         self.inner
             .from_candidates(csa_color, csa_from, csa_piece, is_tsuitate, ignore_turn)
     }
@@ -251,12 +158,12 @@ impl PyGame {
 
 pub(crate) fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyGame>()?;
-    m.add("INFO_NONE", INFO_NONE)?;
-    m.add("INFO_FOUL", INFO_FOUL)?;
-    m.add("INFO_FOUL_UNDER_CHECK", INFO_FOUL_UNDER_CHECK)?;
-    m.add("INFO_CHECK", INFO_CHECK)?;
-    m.add("INFO_CHECKMATE", INFO_CHECKMATE)?;
-    m.add("INFO_LOSS_BY_FOUL", INFO_LOSS_BY_FOUL)?;
-    m.add("INFO_DRAW", INFO_DRAW)?;
+    m.add("INFO_NONE", Info::None as u8)?;
+    m.add("INFO_FOUL", Info::Foul as u8)?;
+    m.add("INFO_FOUL_UNDER_CHECK", Info::FoulUnderCheck as u8)?;
+    m.add("INFO_CHECK", Info::Check as u8)?;
+    m.add("INFO_CHECKMATE", Info::Checkmate as u8)?;
+    m.add("INFO_LOSS_BY_FOUL", Info::LossByFoul as u8)?;
+    m.add("INFO_DRAW", Info::Draw as u8)?;
     Ok(())
 }

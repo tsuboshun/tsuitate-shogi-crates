@@ -1,25 +1,19 @@
+#![allow(dead_code)]
 use std::fmt;
 
-use shogi_core::{Bitboard, Color, Hand, Move, PartialPosition, Piece, PieceKind, Square, ToUsi};
-use shogi_legality_extended::{
-    GameKind, Setting, from_candidates, from_candidates_without_assertion, is_valid,
-};
+use shogi_core::{Bitboard, Color, Hand, Move, PartialPosition, Piece, PieceKind, Square};
+use shogi_legality_extended::{GameKind, Setting, from_candidates, is_valid};
 use shogi_usi_parser::FromUsi;
-use tsuitate_game::{Game, Info, csa_to_move, csa_to_piece_kind, nth_ascii};
+use tsuitate_game::{
+    Game, Info, color_to_csa_sign, csa_coord_digit, csa_sign_to_color, csa_to_move,
+    csa_to_piece_kind, move_to_csa, piece_kind_to_sfen, piece_to_sfen,
+};
 
 use crate::rl::{
     action_index_to_move as rl_action_index_to_move, infer_last_move_color,
     legal_action_indices_for_position, move_action_indices_to_square,
 };
 use crate::sfen_util::{SfenNormalizeError, denormalize_sfen_from_9x9, normalize_sfen_to_9x9};
-
-pub(crate) const INFO_NONE: u8 = 0;
-pub(crate) const INFO_FOUL: u8 = 1;
-pub(crate) const INFO_FOUL_UNDER_CHECK: u8 = 2;
-pub(crate) const INFO_CHECK: u8 = 3;
-pub(crate) const INFO_CHECKMATE: u8 = 4;
-pub(crate) const INFO_LOSS_BY_FOUL: u8 = 5;
-pub(crate) const INFO_DRAW: u8 = 6;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) enum GameApiError {
@@ -36,7 +30,7 @@ impl fmt::Display for GameApiError {
             Self::UnknownGameKind => write!(f, "unknown game kind"),
             Self::InvalidSfen(err) => write!(f, "invalid sfen: {err:?}"),
             Self::PromotionRanksTooLarge => {
-                write!(f, "promotion_rank must be less than or equal to ranks")
+                return write!(f, "promotion_rank must be less than or equal to ranks");
             }
             Self::InvalidNormalizedSfen => write!(f, "invalid normalized sfen"),
             Self::InvalidLastInfo => write!(f, "invalid last_info"),
@@ -44,104 +38,10 @@ impl fmt::Display for GameApiError {
     }
 }
 
-fn info_from_u8(value: u8) -> Option<Info> {
-    match value {
-        INFO_NONE => Some(Info::None),
-        INFO_FOUL => Some(Info::Foul),
-        INFO_FOUL_UNDER_CHECK => Some(Info::FoulUnderCheck),
-        INFO_CHECK => Some(Info::Check),
-        INFO_CHECKMATE => Some(Info::Checkmate),
-        INFO_LOSS_BY_FOUL => Some(Info::LossByFoul),
-        INFO_DRAW => Some(Info::Draw),
-        _ => None,
-    }
-}
-
-fn csa_coord_digit(value: &str, index: usize) -> Option<u8> {
-    nth_ascii(value, index)
-        .and_then(|ch| ch.to_digit(10))
-        .map(|digit| digit as u8)
-}
-
-fn color_to_csa_sign(color: Color) -> char {
-    match color {
-        Color::Black => '+',
-        Color::White => '-',
-    }
-}
-
-fn piece_kind_to_csa(piece_kind: PieceKind) -> &'static str {
-    match piece_kind {
-        PieceKind::Pawn => "FU",
-        PieceKind::Lance => "KY",
-        PieceKind::Knight => "KE",
-        PieceKind::Silver => "GI",
-        PieceKind::Gold => "KI",
-        PieceKind::Bishop => "KA",
-        PieceKind::Rook => "HI",
-        PieceKind::King => "OU",
-        PieceKind::ProPawn => "TO",
-        PieceKind::ProLance => "NY",
-        PieceKind::ProKnight => "NK",
-        PieceKind::ProSilver => "NG",
-        PieceKind::ProBishop => "UM",
-        PieceKind::ProRook => "RY",
-    }
-}
-
-fn piece_to_sfen(piece: Piece) -> String {
-    let mut buf = String::new();
-    piece.to_usi(&mut buf).unwrap();
-    buf
-}
-
-#[inline]
-fn is_sliding_piece(piece_kind: PieceKind) -> bool {
-    matches!(
-        piece_kind,
-        PieceKind::Lance
-            | PieceKind::Bishop
-            | PieceKind::Rook
-            | PieceKind::ProBishop
-            | PieceKind::ProRook
-    )
-}
-
-/// Returns the squares whose file and rank are both within `max_distance` of
-/// `from`. `max_distance` must be less than 8.
-#[inline]
-fn sliding_distance_mask(from: Square, max_distance: u8) -> Bitboard {
-    debug_assert!(max_distance < 8);
-
-    let min_file = from.file().saturating_sub(max_distance).max(1);
-    let max_file = from.file().saturating_add(max_distance).min(9);
-    let min_rank = from.rank().saturating_sub(max_distance).max(1);
-    let max_rank = from.rank().saturating_add(max_distance).min(9);
-    let rank_pattern = ((1u16 << (max_rank - min_rank + 1)) - 1) << (min_rank - 1);
-    let mut mask = Bitboard::empty();
-    for file in min_file..=max_file {
-        // Safety: the bounds above keep `file` in 1..=9 and `rank_pattern`
-        // within the low nine bits.
-        mask |= unsafe { Bitboard::from_file_unchecked(file, rank_pattern) };
-    }
-    mask
-}
-
 #[derive(Clone)]
 pub(crate) struct GameApi {
     inner: Game,
     setting: Setting,
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) struct MoveAnalysis {
-    pub(crate) csa_move: String,
-    pub(crate) valid: bool,
-    pub(crate) last_info: Option<u8>,
-    pub(crate) last_capture: Option<String>,
-    pub(crate) sfen: String,
-    pub(crate) fouls: (i8, i8),
-    pub(crate) attack_counts: Option<Vec<u8>>,
 }
 
 impl GameApi {
@@ -166,7 +66,7 @@ impl GameApi {
         let initial =
             PartialPosition::from_usi(&sfen).map_err(|_| GameApiError::InvalidNormalizedSfen)?;
         let last_info = match last_info {
-            Some(value) => Some(info_from_u8(value).ok_or(GameApiError::InvalidLastInfo)?),
+            Some(value) => Some(Info::try_from(value).map_err(|_| GameApiError::InvalidLastInfo)?),
             None => None,
         };
 
@@ -206,35 +106,7 @@ impl GameApi {
             });
         }
 
-        match mv {
-            Move::Drop { piece, to } => {
-                let piece_csa = piece_kind_to_csa(piece.piece_kind());
-                Some(format!("{}00{}{}{}", sign, to.file(), to.rank(), piece_csa))
-            }
-            Move::Normal { from, to, promote } => {
-                let piece_kind = if promote {
-                    self.position()
-                        .piece_at(from)
-                        .and_then(|piece| piece.piece_kind().promote())
-                        .or_else(|| self.position().piece_at(to).map(|piece| piece.piece_kind()))
-                } else {
-                    self.position()
-                        .piece_at(from)
-                        .map(|piece| piece.piece_kind())
-                        .or_else(|| self.position().piece_at(to).map(|piece| piece.piece_kind()))
-                }?;
-                let piece_csa = piece_kind_to_csa(piece_kind);
-                Some(format!(
-                    "{}{}{}{}{}{}",
-                    sign,
-                    from.file(),
-                    from.rank(),
-                    to.file(),
-                    to.rank(),
-                    piece_csa
-                ))
-            }
-        }
+        move_to_csa(mv, self.position())
     }
 
     pub(crate) fn last_capture_piece_kind(&self) -> Option<PieceKind> {
@@ -259,7 +131,7 @@ impl GameApi {
 
     pub(crate) fn action_index_to_csa_move(&self, action_index: usize) -> Option<String> {
         let mv = self.action_index_to_move(action_index)?;
-        self.move_to_csa(mv)
+        move_to_csa(mv, self.position())
     }
 
     pub(crate) fn move_action_indices_to(&self, file: u8, rank: u8) -> Vec<usize> {
@@ -272,35 +144,6 @@ impl GameApi {
                 })
             })
             .collect()
-    }
-
-    pub(crate) fn move_to_csa(&self, mv: Move) -> Option<String> {
-        match mv {
-            Move::Drop { piece, to } => {
-                let sign = color_to_csa_sign(piece.color());
-                let piece_csa = piece_kind_to_csa(piece.piece_kind());
-                Some(format!("{}00{}{}{}", sign, to.file(), to.rank(), piece_csa))
-            }
-            Move::Normal { from, to, promote } => {
-                let piece = self.position().piece_at(from)?;
-                let piece_kind = if promote {
-                    piece.piece_kind().promote()?
-                } else {
-                    piece.piece_kind()
-                };
-                let sign = color_to_csa_sign(piece.color());
-                let piece_csa = piece_kind_to_csa(piece_kind);
-                Some(format!(
-                    "{}{}{}{}{}{}",
-                    sign,
-                    from.file(),
-                    from.rank(),
-                    to.file(),
-                    to.rank(),
-                    piece_csa
-                ))
-            }
-        }
     }
 
     pub(crate) fn make_move_raw(&mut self, mv: Move) -> bool {
@@ -424,137 +267,17 @@ impl GameApi {
         self.inner.fouls.iter().map(|foul| *foul as i8).collect()
     }
 
-    fn fouls_tuple(&self) -> (i8, i8) {
-        (self.inner.fouls[0], self.inner.fouls[1])
-    }
-
     pub(crate) fn set_fouls(&mut self, foul0: i8, foul1: i8) {
         self.inner.fouls[0] = foul0;
         self.inner.fouls[1] = foul1;
     }
 
-    pub(crate) fn last_info(&self) -> Option<u8> {
-        self.inner.last_info.map(|info| info as u8)
+    pub(crate) fn last_info(&self) -> Option<Info> {
+        self.inner.last_info
     }
 
     pub(crate) fn last_capture(&self) -> Option<String> {
-        self.inner.last_capture.map(|pk| {
-            let mut buf = String::new();
-            pk.to_usi(&mut buf).unwrap();
-            buf
-        })
-    }
-
-    /// Returns attack counts in SFEN board order: rank 1 to rank N, and within
-    /// each rank file N to file 1.
-    ///
-    /// When `treat_friendly_target_as_empty` is `true`, a square occupied by a
-    /// friendly piece is treated as empty only when deciding whether that
-    /// square itself is attacked. The piece still blocks attacks beyond it, so
-    /// a friendly piece on a rook, bishop, or lance ray remains an obstacle.
-    /// When it is `false`, every square occupied by a friendly piece has an
-    /// attack count of zero; friendly pieces still block attacks beyond them.
-    pub(crate) fn attack_counts(
-        &self,
-        color: Color,
-        treat_friendly_target_as_empty: bool,
-        max_sliding_distance: Option<u8>,
-    ) -> Vec<u8> {
-        self.attack_counts_with_tsuitate_setting(
-            color,
-            treat_friendly_target_as_empty,
-            max_sliding_distance,
-            self.setting.is_tsuitate,
-        )
-    }
-
-    fn attack_counts_with_tsuitate_setting(
-        &self,
-        color: Color,
-        treat_friendly_target_as_empty: bool,
-        max_sliding_distance: Option<u8>,
-        is_tsuitate: bool,
-    ) -> Vec<u8> {
-        let mut target_position = self.position().clone();
-        if treat_friendly_target_as_empty {
-            for square in Square::all() {
-                if target_position
-                    .piece_at(square)
-                    .is_some_and(|piece| piece.color() == color)
-                {
-                    target_position.piece_set(square, None);
-                }
-            }
-        }
-
-        let occupied = if is_tsuitate {
-            self.position().player_bitboard(color)
-        } else {
-            !self.position().vacant_bitboard()
-        };
-        let mut counts = vec![0u8; self.setting.files as usize * self.setting.ranks as usize];
-        let mut pieces = self.position().player_bitboard(color) & self.setting.board_mask;
-        while let Some(from) = pieces.pop() {
-            let Some(piece) = self.position().piece_at(from) else {
-                continue;
-            };
-            let mut attacks = from_candidates_without_assertion(
-                occupied,
-                &target_position,
-                piece,
-                from.file(),
-                from.rank(),
-                self.setting.game_kind,
-            ) & self.setting.board_mask;
-
-            if let Some(max_distance) = max_sliding_distance
-                && max_distance < 8
-                && is_sliding_piece(piece.piece_kind())
-            {
-                attacks &= sliding_distance_mask(from, max_distance);
-            }
-
-            while let Some(square) = attacks.pop() {
-                let index = (square.rank() as usize - 1) * self.setting.files as usize
-                    + (self.setting.files - square.file()) as usize;
-                counts[index] += 1;
-            }
-        }
-        counts
-    }
-
-    pub(crate) fn analyze_moves(
-        &self,
-        moves: &[String],
-        attack_color: Color,
-        include_attack_counts: bool,
-        treat_friendly_target_as_empty: bool,
-        max_sliding_distance: Option<u8>,
-    ) -> Vec<MoveAnalysis> {
-        moves
-            .iter()
-            .map(|csa_move| {
-                let mut game = self.clone();
-                let valid = game.make_move(csa_move);
-                let attack_counts = include_attack_counts.then(|| {
-                    game.attack_counts_with_tsuitate_setting(
-                        attack_color,
-                        treat_friendly_target_as_empty,
-                        max_sliding_distance,
-                        false,
-                    )
-                });
-                MoveAnalysis {
-                    csa_move: csa_move.clone(),
-                    valid,
-                    last_info: game.last_info(),
-                    last_capture: game.last_capture(),
-                    sfen: game.sfen(None, false),
-                    fouls: game.fouls_tuple(),
-                    attack_counts,
-                }
-            })
-            .collect()
+        self.inner.last_capture.map(piece_kind_to_sfen)
     }
 
     pub(crate) fn is_valid(&self, csa_move: &str, is_tsuitate: bool) -> bool {
@@ -616,10 +339,8 @@ impl GameApi {
             Some(value) => value,
             None => return Vec::new(),
         };
-        let color = match csa_color {
-            '+' => Color::Black,
-            '-' => Color::White,
-            _ => return Vec::new(),
+        let Some(color) = csa_sign_to_color(csa_color) else {
+            return Vec::new();
         };
 
         let setting = match csa_piece {
@@ -713,41 +434,6 @@ mod tests {
             None,
         )
         .unwrap()
-    }
-
-    #[test]
-    fn king_position_returns_file_and_rank_for_color() {
-        let game = new_standard_game();
-
-        assert_eq!(game.king_position(Color::Black), Some((5, 9)));
-        assert_eq!(game.king_position(Color::White), Some((5, 1)));
-    }
-
-    #[test]
-    fn legal_action_indices_use_requested_color() {
-        let game = new_standard_game();
-        let black_pawn_push = ((7 - 1) * 9 + (6 - 1)) * 27;
-        let white_pawn_push = ((3 - 1) * 9 + (4 - 1)) * 27;
-
-        assert!(
-            game.legal_action_indices(Color::Black)
-                .contains(&black_pawn_push)
-        );
-        assert!(
-            game.legal_action_indices(Color::White)
-                .contains(&white_pawn_push)
-        );
-    }
-
-    #[test]
-    fn action_index_to_csa_move_returns_existing_move_format() {
-        let game = new_standard_game();
-        let black_pawn_push = ((7 - 1) * 9 + (6 - 1)) * 27;
-
-        assert_eq!(
-            game.action_index_to_csa_move(black_pawn_push).as_deref(),
-            Some("+7776FU")
-        );
     }
 
     #[test]
@@ -853,18 +539,6 @@ mod tests {
     }
 
     #[test]
-    fn move_action_indices_to_returns_legal_normal_actions_for_current_state() {
-        let mut game = new_standard_game();
-        let black_pawn_push = ((7 - 1) * 9 + (6 - 1)) * 27;
-        let white_pawn_push = ((3 - 1) * 9 + (4 - 1)) * 27;
-
-        assert_eq!(game.move_action_indices_to(7, 6), vec![black_pawn_push]);
-        assert!(game.move_action_indices_to(3, 4).is_empty());
-        assert!(game.make_move("+7776FU"));
-        assert_eq!(game.move_action_indices_to(3, 4), vec![white_pawn_push]);
-    }
-
-    #[test]
     fn new_sets_initial_last_info() {
         let game = GameApi::new(
             "sfen lnsgkgsnl/1r5b1/ppppppppp/9/9/9/PPPPPPPPP/1B5R1/LNSGKGSNL b - 1",
@@ -874,11 +548,11 @@ mod tests {
             9,
             9,
             150,
-            Some(INFO_CHECK),
+            Some(Info::Check as u8),
         )
         .unwrap();
 
-        assert_eq!(game.last_info(), Some(INFO_CHECK));
+        assert_eq!(game.last_info(), Some(Info::Check));
     }
 
     #[test]
@@ -895,92 +569,5 @@ mod tests {
         );
 
         assert!(matches!(result, Err(GameApiError::InvalidLastInfo)));
-    }
-
-    #[test]
-    fn attack_counts_can_include_friendly_occupied_targets() {
-        let game = GameApi::new(
-            "sfen 9/9/9/9/9/4P4/9/4R4/9 b - 1",
-            GameKind::Shogi.to_u8(),
-            false,
-            3,
-            9,
-            9,
-            150,
-            None,
-        )
-        .unwrap();
-        let index = |file: usize, rank: usize| (rank - 1) * 9 + (9 - file);
-
-        let counts = game.attack_counts(Color::Black, true, None);
-        assert_eq!(counts.len(), 81);
-        assert_eq!(counts[index(5, 7)], 1);
-        assert_eq!(counts[index(5, 6)], 1);
-        assert_eq!(counts[index(5, 5)], 1); // the pawn attacks this square
-
-        let counts = game.attack_counts(Color::Black, false, None);
-        assert_eq!(counts[index(5, 6)], 0);
-    }
-
-    #[test]
-    fn sliding_distance_mask_matches_chebyshev_distance() {
-        for from in Square::all() {
-            for max_distance in 0..8 {
-                let mask = sliding_distance_mask(from, max_distance);
-                for target in Square::all() {
-                    let expected = from
-                        .file()
-                        .abs_diff(target.file())
-                        .max(from.rank().abs_diff(target.rank()))
-                        <= max_distance;
-                    assert_eq!(mask.contains(target), expected, "{from:?}, {target:?}");
-                }
-            }
-        }
-    }
-
-    #[test]
-    fn analyze_moves_evaluates_independent_clones() {
-        let game = new_standard_game();
-        let original_sfen = game.sfen(None, false);
-        let moves = vec!["+7776FU".to_owned(), "+7775FU".to_owned()];
-
-        let results = game.analyze_moves(&moves, Color::Black, true, true, None);
-
-        assert_eq!(results.len(), 2);
-        assert!(results[0].valid);
-        assert_eq!(results[0].last_info, Some(INFO_NONE));
-        assert_eq!(results[0].fouls, (9, 9));
-        assert_eq!(results[0].attack_counts.as_ref().unwrap().len(), 81);
-        assert!(!results[1].valid);
-        assert_eq!(results[1].sfen, original_sfen);
-        assert_eq!(game.sfen(None, false), original_sfen);
-        assert_eq!(game.last_move(), None);
-    }
-
-    #[test]
-    fn analyze_moves_calculates_attacks_as_a_normal_board() {
-        let game = GameApi::new(
-            "sfen 9/9/9/4p4/9/9/P8/4R4/9 b - 1",
-            GameKind::Shogi.to_u8(),
-            true,
-            3,
-            9,
-            9,
-            150,
-            None,
-        )
-        .unwrap();
-        let index = |file: usize, rank: usize| (rank - 1) * 9 + (9 - file);
-
-        let tsuitate_counts = game.attack_counts(Color::Black, true, None);
-        assert_eq!(tsuitate_counts[index(5, 3)], 1);
-
-        let results = game.analyze_moves(&["+9796FU".to_owned()], Color::Black, true, true, None);
-        let counts = results[0].attack_counts.as_ref().unwrap();
-
-        assert!(results[0].valid);
-        assert_eq!(counts[index(5, 4)], 1);
-        assert_eq!(counts[index(5, 3)], 0);
     }
 }

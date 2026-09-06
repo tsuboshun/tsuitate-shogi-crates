@@ -1,11 +1,11 @@
 ## Tsuitate Shogi Crates
 
-The crates in this repository implement an engine for Shogi variants with special rules.
+The crates in this repository implement an engine for Shogi variants with special rules, with a particular focus on imperfect-information variants.
 The following three types of variants are supported:
 
-- Board sizes of 9×9 or smaller
+- Board sizes of 9×9 or smaller, including Dobutsu Shogi
 - Tsuitate Shogi
-- Dobutsu Shogi
+- Dark Shogi
 
 For high-performance use cases, FFI interfaces can be provided to integrate the engine with programs written in other languages. WebAssembly and Python bindings are implemented under `tsuitate_bindings`. Please refer to `sample.html` for instructions on how to use the WebAssembly bindings.
 

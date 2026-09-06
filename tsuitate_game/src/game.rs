@@ -12,6 +12,23 @@ pub enum Info {
     Draw = 6,
 }
 
+impl TryFrom<u8> for Info {
+    type Error = ();
+
+    fn try_from(value: u8) -> Result<Self, Self::Error> {
+        match value {
+            value if value == Self::None as u8 => Ok(Self::None),
+            value if value == Self::Foul as u8 => Ok(Self::Foul),
+            value if value == Self::FoulUnderCheck as u8 => Ok(Self::FoulUnderCheck),
+            value if value == Self::Check as u8 => Ok(Self::Check),
+            value if value == Self::Checkmate as u8 => Ok(Self::Checkmate),
+            value if value == Self::LossByFoul as u8 => Ok(Self::LossByFoul),
+            value if value == Self::Draw as u8 => Ok(Self::Draw),
+            _ => Err(()),
+        }
+    }
+}
+
 #[derive(Eq, PartialEq, Clone, Debug, Default)]
 pub struct Game {
     pub inner: PartialPosition,

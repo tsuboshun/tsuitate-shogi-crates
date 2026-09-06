@@ -1,5 +1,6 @@
 use shogi_core::Color;
-use tsify_next::Tsify;
+use tsify::Tsify;
+use tsuitate_game::csa_sign_to_color;
 use wasm_bindgen::prelude::*;
 
 use crate::game_api::GameApi;
@@ -16,9 +17,9 @@ fn js_error(_message: &str) -> JsValue {
 
 fn parse_optional_csa_color(csa_color: Option<char>) -> Result<Option<Color>, JsValue> {
     match csa_color {
-        Some('+') => Ok(Some(Color::Black)),
-        Some('-') => Ok(Some(Color::White)),
-        Some(_) => Err(js_error("invalid color")),
+        Some(value) => csa_sign_to_color(value)
+            .map(Some)
+            .ok_or_else(|| js_error("invalid color")),
         None => Ok(None),
     }
 }
@@ -105,7 +106,7 @@ impl WasmGame {
 
     #[wasm_bindgen(getter)]
     pub fn last_info(&self) -> Option<u8> {
-        self.inner.last_info()
+        self.inner.last_info().map(|info| info as u8)
     }
 
     #[wasm_bindgen(getter)]
@@ -299,11 +300,11 @@ mod tests {
             9,
             9,
             150,
-            Some(crate::game_api::INFO_CHECK),
+            Some(tsuitate_game::Info::Check as u8),
         )
         .unwrap();
 
-        assert_eq!(game.last_info(), Some(crate::game_api::INFO_CHECK));
+        assert_eq!(game.last_info(), Some(tsuitate_game::Info::Check as u8));
     }
 
     #[test]

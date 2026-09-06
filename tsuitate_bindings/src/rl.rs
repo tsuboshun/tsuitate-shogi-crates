@@ -1,11 +1,16 @@
-use crate::game_api::{
-    GameApi, INFO_CHECK, INFO_FOUL, INFO_FOUL_UNDER_CHECK, INFO_LOSS_BY_FOUL, INFO_NONE,
-};
+//! A set of functions for generating features for reinforcement learning.
+//!
+//! The features are designed based on the book 山岡忠夫, 加納邦彦『強い将棋ソフトの創りかた』マイナビ出版, 2021.
+
+#![allow(dead_code)]
+use crate::game_api::GameApi;
 use shogi_core::{Bitboard, Color, Move, PartialPosition, Piece, PieceKind, Square};
 use shogi_legality_extended::{Setting, is_valid};
+use tsuitate_game::Info;
 
 pub(crate) const ACTION_COUNT: usize = 9 * 9 * 27;
 const ACTIONS_PER_SQUARE: usize = 27;
+// 27 possible actions per destination square: 10 move directions x 2 (promote or not) + 7 drop piece kinds
 const MOVE_ACTIONS: usize = 10;
 const PROMOTE_ACTION_OFFSET: usize = 10;
 const DROP_ACTION_OFFSET: usize = 20;
@@ -14,7 +19,7 @@ const OBSERVATION_CHANNELS_PER_SIDE: usize = 74;
 const OBSERVATION_SIDE_COUNT: usize = 2;
 pub(crate) const OBSERVATION_CHANNEL_COUNT: usize =
     OBSERVATION_CHANNELS_PER_SIDE * OBSERVATION_SIDE_COUNT;
-pub(crate) const OBSERVATION_BYTES: usize = OBSERVATION_CHANNEL_COUNT * 16;
+pub(crate) const OBSERVATION_BYTES: usize = OBSERVATION_CHANNEL_COUNT * 16; // bitboards are 16 bytes each
 
 const BOARD_OBSERVATION_PIECE_KINDS: [PieceKind; 14] = [
     PieceKind::Pawn,
@@ -42,22 +47,27 @@ const HAND_OBSERVATION_SPECS: [(PieceKind, usize); 7] = [
     (PieceKind::Bishop, 2),
     (PieceKind::Rook, 2),
 ];
-const HAND_OBSERVATION_BINARY_CHANNELS: usize = 18 + 4 + 4 + 4 + 4 + 2 + 2;
+const HAND_OBSERVATION_BINARY_CHANNELS: usize = 18 + 4 + 4 + 4 + 4 + 2 + 2; // 38
 
 const OBSERVATION_SIDES: [Color; 2] = [Color::Black, Color::White];
 
+// Observation are represented as a set of bitboards, one for each channel.
+// First half of the channels are for Black's perspective, second half for White's perspective.
+// The channels of each side are organized as follows:
 const OBS_BOARD_CHANNEL_OFFSET: usize = 0;
 const OBS_HAND_CHANNEL_OFFSET: usize =
     OBS_BOARD_CHANNEL_OFFSET + BOARD_OBSERVATION_PIECE_KINDS.len();
+// 14 (The board is encoded using bitboards for each piece type)
 const OBS_LAST_MOVE_FROM_MOVE_CHANNEL: usize =
     OBS_HAND_CHANNEL_OFFSET + HAND_OBSERVATION_BINARY_CHANNELS;
-const OBS_LAST_MOVE_FROM_DROP_OFFSET: usize = OBS_LAST_MOVE_FROM_MOVE_CHANNEL + 1;
-const OBS_LAST_MOVE_TO_CHANNEL: usize = OBS_LAST_MOVE_FROM_DROP_OFFSET + DROP_PIECE_KINDS.len();
-const OBS_LAST_CAPTURE_KIND_OFFSET: usize = OBS_LAST_MOVE_TO_CHANNEL + 1;
+// 52 (Hand pieces are encoded using bitboards consisting entirely of 0s or 1s for each piece type x count combination)
+const OBS_LAST_MOVE_FROM_DROP_OFFSET: usize = OBS_LAST_MOVE_FROM_MOVE_CHANNEL + 1; // 53
+const OBS_LAST_MOVE_TO_CHANNEL: usize = OBS_LAST_MOVE_FROM_DROP_OFFSET + DROP_PIECE_KINDS.len(); // 60
+const OBS_LAST_CAPTURE_KIND_OFFSET: usize = OBS_LAST_MOVE_TO_CHANNEL + 1; // 61
 const OBS_LAST_CAPTURE_POSITION_CHANNEL: usize =
-    OBS_LAST_CAPTURE_KIND_OFFSET + DROP_PIECE_KINDS.len();
-const OBS_LAST_INFO_OFFSET: usize = OBS_LAST_CAPTURE_POSITION_CHANNEL + 1;
-const OBS_COLOR_CHANNEL: usize = OBS_LAST_INFO_OFFSET + 4;
+    OBS_LAST_CAPTURE_KIND_OFFSET + DROP_PIECE_KINDS.len(); // 68
+const OBS_LAST_INFO_OFFSET: usize = OBS_LAST_CAPTURE_POSITION_CHANNEL + 1; // 69
+const OBS_COLOR_CHANNEL: usize = OBS_LAST_INFO_OFFSET + 4; // 73
 
 // (file_delta, rank_delta) from the moving side's viewpoint for Black:
 // [forward, forward-right, right, ..., left, forward-left,
@@ -210,22 +220,6 @@ fn observation_channel_index(side_index: usize, channel_index: usize) -> usize {
 }
 
 #[inline(always)]
-fn fill_observation_channel(
-    observations: &mut [Bitboard],
-    side_index: usize,
-    channel_index: usize,
-    full_bitboard: Bitboard,
-    value: u8,
-) {
-    let idx = observation_channel_index(side_index, channel_index);
-    observations[idx] = if value == 0 {
-        Bitboard::empty()
-    } else {
-        full_bitboard
-    };
-}
-
-#[inline(always)]
 fn set_observation_channel(
     observations: &mut [Bitboard],
     side_index: usize,
@@ -260,11 +254,7 @@ pub(crate) fn infer_last_move_color(game: &GameApi, mv: &Move) -> Color {
         Move::Normal { .. } => {
             let side_to_move = game.position().side_to_move();
             match game.last_info() {
-                Some(v)
-                    if v == INFO_FOUL || v == INFO_FOUL_UNDER_CHECK || v == INFO_LOSS_BY_FOUL =>
-                {
-                    side_to_move
-                }
+                Some(Info::Foul | Info::FoulUnderCheck | Info::LossByFoul) => side_to_move,
                 _ => side_to_move.flip(),
             }
         }
@@ -299,12 +289,15 @@ pub(crate) fn fill_observations(game: &GameApi, observations: &mut [Bitboard]) {
                 .unwrap_or(0)
                 .min(channel_count as u8) as usize;
             for nth in 0..channel_count {
-                fill_observation_channel(
+                set_observation_channel(
                     observations,
                     side_index,
                     hand_channel_offset + nth,
-                    full_bitboard,
-                    u8::from(nth < held),
+                    if nth < held {
+                        full_bitboard
+                    } else {
+                        Bitboard::empty()
+                    },
                 );
             }
             hand_channel_offset += channel_count;
@@ -326,12 +319,11 @@ pub(crate) fn fill_observations(game: &GameApi, observations: &mut [Bitboard]) {
             if last_move_visible {
                 if let Some(Move::Drop { piece, .. }) = last_move.as_ref() {
                     if piece.piece_kind() == *piece_kind {
-                        fill_observation_channel(
+                        set_observation_channel(
                             observations,
                             side_index,
                             OBS_LAST_MOVE_FROM_DROP_OFFSET + channel_index,
                             full_bitboard,
-                            1,
                         );
                     }
                 }
@@ -351,12 +343,11 @@ pub(crate) fn fill_observations(game: &GameApi, observations: &mut [Bitboard]) {
 
         for (channel_index, piece_kind) in DROP_PIECE_KINDS.iter().enumerate() {
             if last_capture == Some(*piece_kind) {
-                fill_observation_channel(
+                set_observation_channel(
                     observations,
                     side_index,
                     OBS_LAST_CAPTURE_KIND_OFFSET + channel_index,
                     full_bitboard,
-                    1,
                 );
             }
         }
@@ -372,51 +363,41 @@ pub(crate) fn fill_observations(game: &GameApi, observations: &mut [Bitboard]) {
             }
         }
 
-        if last_info == Some(INFO_NONE) {
-            fill_observation_channel(
+        if last_info == Some(Info::None) {
+            set_observation_channel(
                 observations,
                 side_index,
                 OBS_LAST_INFO_OFFSET,
                 full_bitboard,
-                1,
             );
         }
-        if last_info == Some(INFO_FOUL) {
-            fill_observation_channel(
+        if last_info == Some(Info::Foul) {
+            set_observation_channel(
                 observations,
                 side_index,
                 OBS_LAST_INFO_OFFSET + 1,
                 full_bitboard,
-                1,
             );
         }
-        if last_info == Some(INFO_FOUL_UNDER_CHECK) {
-            fill_observation_channel(
+        if last_info == Some(Info::FoulUnderCheck) {
+            set_observation_channel(
                 observations,
                 side_index,
                 OBS_LAST_INFO_OFFSET + 2,
                 full_bitboard,
-                1,
             );
         }
-        if last_info == Some(INFO_CHECK) {
-            fill_observation_channel(
+        if last_info == Some(Info::Check) {
+            set_observation_channel(
                 observations,
                 side_index,
                 OBS_LAST_INFO_OFFSET + 3,
                 full_bitboard,
-                1,
             );
         }
 
         if last_move_color == Some(Color::Black) {
-            fill_observation_channel(
-                observations,
-                side_index,
-                OBS_COLOR_CHANNEL,
-                full_bitboard,
-                1,
-            );
+            set_observation_channel(observations, side_index, OBS_COLOR_CHANNEL, full_bitboard);
         }
     }
 }
