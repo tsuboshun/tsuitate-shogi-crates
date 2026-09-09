@@ -1,6 +1,6 @@
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
-use pyo3::types::{PyDict, PyModule};
+use pyo3::types::PyModule;
 use shogi_core::Color;
 use tsuitate_game::{Info, color_to_csa_sign, csa_color_to_color};
 
@@ -120,10 +120,42 @@ impl PyGame {
         csa_color_to_color(csa_color).and_then(|color| self.inner.king_position(color))
     }
 
-    fn legal_action_indices(&self, csa_color: &str) -> Vec<usize> {
-        csa_color_to_color(csa_color)
-            .map(|color| self.inner.legal_action_indices(color))
+    #[pyo3(signature = (csa_color, consecutive_fouls=None, last_lost_piece_square=None))]
+    fn legal_action_indices(
+        &self,
+        csa_color: &str,
+        consecutive_fouls: Option<Vec<(String, Option<bool>)>>,
+        last_lost_piece_square: Option<(u8, u8)>,
+    ) -> PyResult<Vec<usize>> {
+        let color =
+            csa_color_to_color(csa_color).ok_or_else(|| PyValueError::new_err("invalid color"))?;
+        let mut position = self.inner.position().clone();
+        position.side_to_move_set(color);
+        let fouls = consecutive_fouls
             .unwrap_or_default()
+            .into_iter()
+            .map(|(action, in_check_before)| {
+                let action = tsuitate_game::csa_to_move(&action, &position)
+                    .map_err(|e| PyValueError::new_err(format!("invalid foul move: {e:?}")))?;
+                Ok(crate::FoulAttempt {
+                    action,
+                    in_check_before,
+                })
+            })
+            .collect::<PyResult<Vec<_>>>()?;
+        let square = last_lost_piece_square
+            .map(|(file, rank)| {
+                shogi_core::Square::new(file, rank)
+                    .ok_or_else(|| PyValueError::new_err("invalid capture square"))
+            })
+            .transpose()?;
+        Ok(self.inner.legal_action_indices(
+            color,
+            Some(&crate::ActionHistory {
+                consecutive_fouls: &fouls,
+                last_lost_piece_square: square,
+            }),
+        ))
     }
 
     fn action_index_to_move(&self, action_index: usize) -> Option<String> {

@@ -5,6 +5,9 @@ mod rl;
 mod sfen_util;
 mod wasm_game;
 
+pub use game_api::GameApi;
+pub use rl::{ActionHistory, FoulAttempt, move_to_action_index};
+
 pub use wasm_game::{WasmGame, WasmInfo};
 
 #[cfg(feature = "python")]

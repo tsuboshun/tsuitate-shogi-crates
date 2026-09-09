@@ -39,12 +39,16 @@ impl fmt::Display for GameApiError {
 }
 
 #[derive(Clone)]
-pub(crate) struct GameApi {
+pub struct GameApi {
     inner: Game,
     setting: Setting,
 }
 
 impl GameApi {
+    pub fn from_game(inner: Game, setting: Setting) -> Self {
+        Self { inner, setting }
+    }
+
     pub(crate) fn new(
         sfen: &str,
         game_kind: u8,
@@ -119,13 +123,22 @@ impl GameApi {
             .map(|square| (square.file(), square.rank()))
     }
 
-    pub(crate) fn legal_action_indices(&self, color: Color) -> Vec<usize> {
+    pub fn legal_action_indices(
+        &self,
+        color: Color,
+        history: Option<&crate::ActionHistory<'_>>,
+    ) -> Vec<usize> {
+        if self.position().side_to_move() == color {
+            return legal_action_indices_for_position(self.position(), &self.setting, history);
+        }
         let mut position = self.position().clone();
         position.side_to_move_set(color);
-        legal_action_indices_for_position(&position, &self.setting)
+        legal_action_indices_for_position(&position, &self.setting, history)
     }
 
-    pub(crate) fn action_index_to_move(&self, action_index: usize) -> Option<Move> {
+    /// Decode using the game's current side to move.
+    /// Pass indices generated for that side; decoding alone does not validate a move.
+    pub fn action_index_to_move(&self, action_index: usize) -> Option<Move> {
         rl_action_index_to_move(self.position(), self.setting.is_tsuitate, action_index)
     }
 
@@ -231,7 +244,10 @@ impl GameApi {
         board
     }
 
-    pub(crate) fn sfen(&self, viewpoint: Option<Color>, is_dark_shogi: bool) -> String {
+    /// SFEN cropped to the configured board size. A viewpoint hides the opponent's
+    /// hand and board pieces, or reveals attacked squares in dark shogi (`?` elsewhere).
+    /// `None` returns the full position, regardless of `is_dark_shogi`.
+    pub fn sfen(&self, viewpoint: Option<Color>, is_dark_shogi: bool) -> String {
         let sfen = if let Some(viewpoint) = viewpoint {
             let mut position = self.position().clone();
             if is_dark_shogi {

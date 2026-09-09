@@ -5,7 +5,9 @@
 #![allow(dead_code)]
 use crate::game_api::GameApi;
 use shogi_core::{Bitboard, Color, Move, PartialPosition, Piece, PieceKind, Square};
-use shogi_legality_extended::{Setting, is_valid};
+use shogi_legality_extended::{
+    GameKind, Setting, drop_candidates, is_valid, normal_move_candidates,
+};
 use tsuitate_game::Info;
 
 pub(crate) const ACTION_COUNT: usize = 9 * 9 * 27;
@@ -178,19 +180,162 @@ pub(crate) fn action_index_to_move(
     Some(Move::Normal { from, to, promote })
 }
 
+/// A previously accepted attempt that the game reported as a foul.
+/// All entries must belong to the requested player and the current unchanged board.
+#[derive(Clone, Copy, Debug)]
+pub struct FoulAttempt {
+    pub action: Move,
+    pub in_check_before: Option<bool>,
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+pub struct ActionHistory<'a> {
+    pub consecutive_fouls: &'a [FoulAttempt],
+    pub last_lost_piece_square: Option<Square>,
+}
+
+/// Encode a geometrically valid move; this does not check board legality.
+pub fn move_to_action_index(action: Move, side: Color) -> Option<usize> {
+    let (to, kind) = match action {
+        Move::Drop { piece, to } => {
+            if piece.color() != side {
+                return None;
+            }
+            (
+                to,
+                DROP_ACTION_OFFSET
+                    + DROP_PIECE_KINDS
+                        .iter()
+                        .position(|&k| k == piece.piece_kind())?,
+            )
+        }
+        Move::Normal { from, to, promote } => {
+            let sign = if side == Color::Black { 1 } else { -1 };
+            let df = (to.file() as i8 - from.file() as i8) * sign;
+            let dr = (to.rank() as i8 - from.rank() as i8) * sign;
+            let direction = if dr == -2 && df.abs() == 1 {
+                (df, dr)
+            } else if (df != 0 || dr != 0) && (df == 0 || dr == 0 || df.abs() == dr.abs()) {
+                (df.signum(), dr.signum())
+            } else {
+                return None;
+            };
+            let dir = MOVE_DELTAS.iter().position(|&d| d == direction)?;
+            (to, dir + if promote { PROMOTE_ACTION_OFFSET } else { 0 })
+        }
+    };
+    Some(((to.file() as usize - 1) * 9 + to.rank() as usize - 1) * ACTIONS_PER_SQUARE + kind)
+}
+
 pub(crate) fn legal_action_indices_for_position(
     position: &PartialPosition,
     setting: &Setting,
+    history: Option<&ActionHistory<'_>>,
 ) -> Vec<usize> {
-    let mut ret = Vec::new();
-    for action_index in 0..ACTION_COUNT {
-        let is_legal = action_index_to_move(position, setting.is_tsuitate, action_index)
-            .is_some_and(|mv| is_valid(position, mv, setting));
-        if is_legal {
-            ret.push(action_index);
+    let side = position.side_to_move();
+    let square_index = |sq: Square| (sq.file() as usize - 1) * 9 + sq.rank() as usize - 1;
+    let mut banned_moves = [Bitboard::empty(); 81];
+    let mut banned_drops = [Bitboard::empty(); 7];
+    if setting.is_tsuitate {
+        if let Some(history) = history {
+            if let Some(to) = history.last_lost_piece_square {
+                for mask in &mut banned_drops {
+                    *mask |= Bitboard::single(to);
+                }
+            }
+            for attempt in history.consecutive_fouls {
+                if !is_valid(position, attempt.action, setting) {
+                    continue;
+                }
+                match attempt.action {
+                    Move::Drop { piece, to } => {
+                        if let Some(k) = DROP_PIECE_KINDS
+                            .iter()
+                            .position(|&k| k == piece.piece_kind())
+                        {
+                            banned_drops[k] |= Bitboard::single(to);
+                            if setting.game_kind == GameKind::Shogi
+                                && piece.piece_kind() != PieceKind::Pawn
+                            // A pawn drop may be a foul due to pawn-drop mate, while other pieces may still be droppable on that square.
+                            {
+                                for mask in &mut banned_drops {
+                                    *mask |= Bitboard::single(to);
+                                }
+                            }
+                        }
+                    }
+                    Move::Normal { from, to, .. } => {
+                        let mask = &mut banned_moves[square_index(from)];
+                        *mask |= Bitboard::single(to); // Both promotion choices.
+                        if attempt.in_check_before != Some(false) {
+                            continue;
+                        }
+                        let df = to.file() as i8 - from.file() as i8;
+                        let dr = to.rank() as i8 - from.rank() as i8;
+                        let kind = position.piece_at(from).unwrap().piece_kind();
+                        let sliding = match kind {
+                            PieceKind::Rook | PieceKind::ProRook => df == 0 || dr == 0,
+                            PieceKind::Bishop | PieceKind::ProBishop => df.abs() == dr.abs(),
+                            PieceKind::Lance => df == 0,
+                            _ => false,
+                        };
+                        if sliding {
+                            let mut sq = to.shift(df.signum(), dr.signum());
+                            while let Some(to) = sq {
+                                *mask |= Bitboard::single(to);
+                                sq = to.shift(df.signum(), dr.signum());
+                            }
+                        }
+                    }
+                }
+            }
         }
     }
-    ret
+    // Generate from existing pieces, encode directly, then emit in index order.
+    // Each bitset is a mask of the 27 possible actions for that destination square.
+    let mut masks = [0u32; 81];
+    let mut own = position.player_bitboard(side) & setting.board_mask;
+    while let Some(from) = own.pop() {
+        let (plain, promoted) = normal_move_candidates(position, from, setting);
+        let mut targets = (plain | promoted) & !banned_moves[square_index(from)];
+        while let Some(to) = targets.pop() {
+            let index = move_to_action_index(
+                Move::Normal {
+                    from,
+                    to,
+                    promote: false,
+                },
+                side,
+            )
+            .expect("valid candidate must encode");
+            let mask = &mut masks[index / ACTIONS_PER_SQUARE];
+            let bit = 1 << (index % ACTIONS_PER_SQUARE);
+            if plain.contains(to) {
+                *mask |= bit;
+            }
+            if promoted.contains(to) {
+                *mask |= bit << PROMOTE_ACTION_OFFSET;
+            }
+        }
+    }
+    for (k, &kind) in DROP_PIECE_KINDS.iter().enumerate() {
+        let piece = Piece::new(kind, side);
+        if position.hand(piece).unwrap_or(0) == 0 {
+            continue;
+        }
+        let mut targets = drop_candidates(position, piece, setting) & !banned_drops[k];
+        while let Some(to) = targets.pop() {
+            masks[square_index(to)] |= 1 << (DROP_ACTION_OFFSET + k);
+        }
+    }
+    let mut result = Vec::with_capacity(masks.iter().map(|m| m.count_ones() as usize).sum());
+    for (square, mut mask) in masks.into_iter().enumerate() {
+        while mask != 0 {
+            result.push(square * ACTIONS_PER_SQUARE + mask.trailing_zeros() as usize);
+            mask &= mask - 1;
+        }
+    }
+    result
 }
 
 pub(crate) fn move_action_indices_to_square(file: u8, rank: u8) -> Vec<usize> {
@@ -207,10 +352,8 @@ pub(crate) fn fill_legal_actions_mask(game: &GameApi, legal_actions: &mut [u8]) 
     legal_actions.fill(0);
     let position = game.position();
     let setting = game.setting();
-    for action_index in 0..ACTION_COUNT {
-        let is_legal = action_index_to_move(position, setting.is_tsuitate, action_index)
-            .is_some_and(|mv| is_valid(position, mv, setting));
-        legal_actions[action_index] = u8::from(is_legal);
+    for index in legal_action_indices_for_position(position, setting, None) {
+        legal_actions[index] = 1;
     }
 }
 
@@ -623,7 +766,7 @@ mod tests {
 
     #[test]
     fn action_index_to_move_decodes_white_knight_move() {
-        // 白桂: 8二 → 7四
+        // White knight: 8b → 7d
         let game = GameApi::new(
             "4k4/1n7/9/9/9/9/9/9/4K4 w - 1",
             GameKind::Shogi.to_u8(),
@@ -636,11 +779,200 @@ mod tests {
         )
         .unwrap();
 
-        // 7四への、白視点で左前へ跳ぶ桂馬の action
+        // Action for a knight jumping forward-left from White's perspective to 7d.
         let idx = ((7 - 1) * 9 + (4 - 1)) * ACTIONS_PER_SQUARE + 9;
 
         let mv = action_index_to_move(game.position(), false, idx).expect("move should decode");
 
         assert_eq!(mv, csa_to_move("-8274KE", game.position()).unwrap());
+    }
+}
+
+#[cfg(test)]
+mod action_generation_tests {
+    use super::*;
+    use shogi_usi_parser::FromUsi;
+
+    fn mini() -> (PartialPosition, Setting) {
+        (
+            PartialPosition::from_usi("sfen 4rbsgk/8p/9/4P4/4KGSBR/9/9/9/9 b - 1").unwrap(),
+            Setting::new(5, 5, 1, GameKind::Shogi, true),
+        )
+    }
+    fn moves(pos: &PartialPosition, setting: &Setting, history: &ActionHistory) -> Vec<Move> {
+        legal_action_indices_for_position(pos, setting, Some(history))
+            .into_iter()
+            .map(|i| action_index_to_move(pos, setting.is_tsuitate, i).unwrap())
+            .collect()
+    }
+    fn mv(text: &str) -> Move {
+        Move::from_usi(text).unwrap()
+    }
+
+    #[test]
+    fn generated_indices_match_full_scan_and_roundtrip() {
+        let (mini, setting) = mini();
+        let standard = PartialPosition::from_usi("startpos").unwrap();
+        for (initial, setting) in [
+            (mini, setting),
+            (standard, Setting::new(9, 9, 3, GameKind::Shogi, true)),
+        ] {
+            for tsuitate in [false, true] {
+                for side in [Color::Black, Color::White] {
+                    let mut pos = initial.clone();
+                    pos.side_to_move_set(side);
+                    for kind in DROP_PIECE_KINDS {
+                        let hand = pos.hand_of_a_player_mut(side);
+                        *hand = hand.added(kind).unwrap();
+                    }
+                    let setting = Setting {
+                        is_tsuitate: tsuitate,
+                        ..setting.clone()
+                    };
+                    for step in 0..12 {
+                        let expected: Vec<_> = (0..ACTION_COUNT)
+                            .filter(|&i| {
+                                action_index_to_move(&pos, setting.is_tsuitate, i)
+                                    .is_some_and(|m| is_valid(&pos, m, &setting))
+                            })
+                            .collect();
+                        let generated = legal_action_indices_for_position(&pos, &setting, None);
+                        assert_eq!(generated, expected);
+                        for &index in &generated {
+                            let m = action_index_to_move(&pos, setting.is_tsuitate, index).unwrap();
+                            assert_eq!(move_to_action_index(m, pos.side_to_move()), Some(index));
+                        }
+                        if generated.is_empty() {
+                            break;
+                        }
+                        // Randomly pick a move to make, but in a deterministic way for testing.
+                        let index = generated[(step * 37 + 5) % generated.len()];
+                        let m = action_index_to_move(&pos, setting.is_tsuitate, index).unwrap();
+                        if pos.make_move(m).is_none() {
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn repeated_move_ignores_promotion_and_no_check_extends_only_same_ray() {
+        let (mut pos, setting) = mini();
+        pos.piece_set(Square::new(1, 1).unwrap(), None);
+        pos.piece_set(Square::new(1, 2).unwrap(), None);
+        pos.piece_set(Square::new(1, 4).unwrap(), Some(Piece::W_P));
+        for check in [Some(false), Some(true), None] {
+            let attempts = [FoulAttempt {
+                action: mv("1e1c"),
+                in_check_before: check,
+            }];
+            let filtered = moves(
+                &pos,
+                &setting,
+                &ActionHistory {
+                    consecutive_fouls: &attempts,
+                    ..Default::default()
+                },
+            );
+            assert!(!filtered.contains(&mv("1e1c")));
+            assert!(filtered.contains(&mv("1e1d"))); // nearer capture can still work
+            assert_eq!(filtered.contains(&mv("1e1a")), check != Some(false));
+            assert_eq!(filtered.contains(&mv("1e1a+")), check != Some(false));
+        }
+        let attempts = [FoulAttempt {
+            action: mv("1e1a+"),
+            in_check_before: None,
+        }];
+        let filtered = moves(
+            &pos,
+            &setting,
+            &ActionHistory {
+                consecutive_fouls: &attempts,
+                ..Default::default()
+            },
+        );
+        assert!(!filtered.contains(&mv("1e1a")));
+        assert!(!filtered.contains(&mv("1e1a+")));
+    }
+
+    #[test]
+    fn drop_inference_excludes_pawn_failure_and_capture_is_not_retained() {
+        let (mut pos, setting) = mini();
+        for kind in [PieceKind::Pawn, PieceKind::Silver, PieceKind::Gold] {
+            let hand = pos.hand_of_a_player_mut(Color::Black);
+            *hand = hand.added(kind).unwrap();
+        }
+        for (failed, ban_others) in [("S*3c", true), ("P*3c", false)] {
+            let attempts = [FoulAttempt {
+                action: mv(failed),
+                in_check_before: None,
+            }];
+            let filtered = moves(
+                &pos,
+                &setting,
+                &ActionHistory {
+                    consecutive_fouls: &attempts,
+                    ..Default::default()
+                },
+            );
+            assert!(!filtered.contains(&mv(failed)));
+            assert_eq!(filtered.contains(&mv("G*3c")), !ban_others);
+        }
+        let history = ActionHistory {
+            last_lost_piece_square: Square::new(3, 3),
+            ..Default::default()
+        };
+        assert!(!moves(&pos, &setting, &history).contains(&mv("G*3c")));
+        assert!(moves(&pos, &setting, &ActionHistory::default()).contains(&mv("G*3c")));
+    }
+
+    #[test]
+    fn sliding_pruning_covers_bishops_lances_and_both_colors() {
+        let (_, setting) = mini();
+        for side in [Color::Black, Color::White] {
+            for (kind, from, failed, farther, nearer) in [
+                (PieceKind::Rook, (3, 5), (3, 3), (3, 2), (3, 4)),
+                (PieceKind::Lance, (3, 5), (3, 3), (3, 2), (3, 4)),
+                (PieceKind::Bishop, (5, 4), (3, 2), (2, 1), (4, 3)),
+            ] {
+                let sq = |(file, rank)| {
+                    Square::new(
+                        if side == Color::Black { file } else { 6 - file },
+                        if side == Color::Black { rank } else { 6 - rank },
+                    )
+                    .unwrap()
+                };
+                let mut pos = PartialPosition::empty();
+                pos.side_to_move_set(side);
+                pos.piece_set(sq((1, 5)), Some(Piece::new(PieceKind::King, side)));
+                pos.piece_set(sq((1, 1)), Some(Piece::new(PieceKind::King, side.flip())));
+                pos.piece_set(sq(from), Some(Piece::new(kind, side)));
+                pos.piece_set(sq(nearer), Some(Piece::new(PieceKind::Pawn, side.flip())));
+                let action = |to| Move::Normal {
+                    from: sq(from),
+                    to: sq(to),
+                    promote: false,
+                };
+                let history = [FoulAttempt {
+                    action: action(failed),
+                    in_check_before: Some(false),
+                }];
+                let filtered = moves(
+                    &pos,
+                    &setting,
+                    &ActionHistory {
+                        consecutive_fouls: &history,
+                        ..Default::default()
+                    },
+                );
+                assert!(filtered.contains(&action(nearer)));
+                assert!(!filtered.contains(&action(farther)));
+                assert!(
+                    moves(&pos, &setting, &ActionHistory::default()).contains(&action(farther))
+                );
+            }
+        }
     }
 }

@@ -11,6 +11,122 @@ fn relative_rank(square: Square, color: Color, setting: &Setting) -> i8 {
     }
 }
 
+#[inline]
+fn promotion_options(piece: Piece, from: Square, to: Square, setting: &Setting) -> (bool, bool) {
+    let rank = relative_rank(to, piece.color(), setting);
+    let kind = piece.piece_kind();
+    let allow_plain = !(setting.game_kind == GameKind::Shogi
+        && ((rank == 1 && matches!(kind, PieceKind::Pawn | PieceKind::Lance | PieceKind::Knight))
+            || (rank == 2 && kind == PieceKind::Knight)));
+    let zone = if kind == PieceKind::Knight {
+        max(2, setting.promotion_rank)
+    } else {
+        setting.promotion_rank
+    } as i8;
+    let allow_promoted = piece.promote().is_some()
+        && (relative_rank(from, piece.color(), setting) <= zone || rank <= zone);
+    (allow_plain, allow_promoted)
+}
+
+/// Destinations satisfying `is_valid` for an own piece, split into
+/// (unpromoted, promoted) moves. Does not check king safety.
+/// Invalid or off-board origins return empty boards.
+pub fn normal_move_candidates(
+    position: &PartialPosition,
+    from: Square,
+    setting: &Setting,
+) -> (shogi_core::Bitboard, shogi_core::Bitboard) {
+    use shogi_core::Bitboard;
+    let mut plain = Bitboard::empty();
+    let mut promoted = Bitboard::empty();
+    if !setting.board_mask.contains(from) {
+        return (plain, promoted);
+    }
+    let Some(piece) = position
+        .piece_at(from)
+        .filter(|p| p.color() == position.side_to_move())
+    else {
+        return (plain, promoted);
+    };
+    let mut targets = normal::from_candidates(position, piece, from, setting);
+    if !setting.is_tsuitate {
+        targets &= !position.piece_bitboard(Piece::new(PieceKind::King, piece.color().flip()));
+    }
+    while let Some(to) = targets.pop() {
+        let (allow_plain, allow_promoted) = promotion_options(piece, from, to, setting);
+        if allow_plain {
+            plain |= Bitboard::single(to);
+        }
+        if allow_promoted {
+            promoted |= Bitboard::single(to);
+        }
+    }
+    (plain, promoted)
+}
+
+/// All destinations satisfying `is_valid` for a drop of `piece`.
+/// Pawn-drop mate validation is retained for non-tsuitate games.
+pub fn drop_candidates(
+    position: &PartialPosition,
+    piece: Piece,
+    setting: &Setting,
+) -> shogi_core::Bitboard {
+    use shogi_core::Bitboard;
+    if piece.color() != position.side_to_move() || position.hand(piece).unwrap_or(0) == 0 {
+        return Bitboard::empty();
+    }
+    let mut targets = setting.board_mask
+        & if setting.is_tsuitate {
+            !position.player_bitboard(piece.color())
+        } else {
+            position.vacant_bitboard()
+        };
+    if setting.game_kind == GameKind::Shogi
+        && matches!(
+            piece.piece_kind(),
+            PieceKind::Pawn | PieceKind::Lance | PieceKind::Knight
+        )
+    {
+        // Build permitted ranks once for the entire piece kind.
+        let mut ranks = 0u16;
+        for rank in 1..=9 {
+            let relative = if piece.color() == Color::Black {
+                rank
+            } else {
+                setting.ranks as i8 - rank + 1
+            };
+            if !(relative == 1
+                && matches!(
+                    piece.piece_kind(),
+                    PieceKind::Pawn | PieceKind::Lance | PieceKind::Knight
+                )
+                || relative == 2 && piece.piece_kind() == PieceKind::Knight)
+            {
+                ranks |= 1 << (rank - 1);
+            }
+        }
+        let mut allowed = Bitboard::empty();
+        let pawns = position.piece_bitboard(Piece::new(PieceKind::Pawn, piece.color()));
+        for file in 1..=9 {
+            // Safety: file is in 1..=9, and rank bits are limited to nine bits.
+            let file_mask = unsafe { Bitboard::from_file_unchecked(file, 0x1ff) };
+            if piece.piece_kind() != PieceKind::Pawn || (pawns & file_mask).is_empty() {
+                allowed |= unsafe { Bitboard::from_file_unchecked(file, ranks) };
+            }
+        }
+        targets &= allowed;
+    }
+    if !setting.is_tsuitate && piece.piece_kind() == PieceKind::Pawn {
+        let mut unchecked = targets;
+        while let Some(to) = unchecked.pop() {
+            if !is_valid(position, Move::Drop { piece, to }, setting) {
+                targets &= !Bitboard::single(to);
+            }
+        }
+    }
+    targets
+}
+
 /// Checks if a move is valid without considering king's safety.
 pub fn is_valid(position: &PartialPosition, mv: Move, setting: &Setting) -> bool {
     let side = position.side_to_move();
@@ -39,34 +155,8 @@ pub fn is_valid(position: &PartialPosition, mv: Move, setting: &Setting) -> bool
                     return false;
                 }
             }
-            // Stuck?
-            let rel_rank = relative_rank(to, side, &setting);
-            if setting.game_kind == GameKind::Shogi {
-                if rel_rank == 1
-                    && matches!(
-                        from_piece.piece_kind(),
-                        PieceKind::Pawn | PieceKind::Lance | PieceKind::Knight,
-                    )
-                    && !promote
-                {
-                    return false;
-                }
-                if rel_rank == 2 && from_piece.piece_kind() == PieceKind::Knight && !promote {
-                    return false;
-                }
-            }
-            // Can promote?
-            let promotion_rank = match from_piece.piece_kind() {
-                PieceKind::Knight => max(2, setting.promotion_rank), // Knight is exception
-                _ => setting.promotion_rank,
-            };
-            if promote
-                && relative_rank(from, side, &setting) > promotion_rank as i8
-                && rel_rank > promotion_rank as i8
-            {
-                return false;
-            }
-            if promote && from_piece.promote().is_none() {
+            let (plain, promoted) = promotion_options(from_piece, from, to, setting);
+            if !(if promote { promoted } else { plain }) {
                 return false;
             }
 
@@ -113,12 +203,11 @@ pub fn is_valid(position: &PartialPosition, mv: Move, setting: &Setting) -> bool
             }
             // Does a double-pawn (`二歩`, *nifu*) happen?
             if piece.piece_kind() == PieceKind::Pawn && setting.game_kind == GameKind::Shogi {
-                let file = to.file();
-                for i in 1..=9 {
-                    let square = unsafe { Square::new(file, i).unwrap_unchecked() };
-                    if position.piece_at(square) == Some(piece) {
-                        return false;
-                    }
+                // A whole file at once, including squares outside a variant's board,
+                // matching the original nine-square scan.
+                let file = unsafe { shogi_core::Bitboard::from_file_unchecked(to.file(), 0x1ff) };
+                if !(position.piece_bitboard(piece) & file).is_empty() {
+                    return false;
                 }
             }
             // Does a drop-pawn-mate (`打ち歩詰め`, *uchifu-zume*) happen?
@@ -309,6 +398,54 @@ mod tests {
     use shogi_usi_parser::FromUsi;
 
     use super::*;
+
+    #[test]
+    fn bulk_candidates_match_single_move_validation() {
+        for (files, ranks, zone, kind) in [
+            (9, 9, 3, GameKind::Shogi),
+            (5, 5, 1, GameKind::Shogi),
+            (3, 4, 1, GameKind::Dobutsu),
+            (5, 5, 0, GameKind::Shogi),
+        ] {
+            for tsuitate in [false, true] {
+                for side in [Color::Black, Color::White] {
+                    let mut position = PartialPosition::from_usi(
+                        "sfen 4rbsgk/4+n+l+ppp/4+B+R+S+L+N/4PLNSG/4KGSBR/9/9/9/9 b RBGSNLP 1",
+                    )
+                    .unwrap();
+                    position.side_to_move_set(side);
+                    *position.hand_of_a_player_mut(side) = position.hand_of_a_player(Color::Black);
+                    let setting = Setting::new(files, ranks, zone, kind, tsuitate);
+                    for from in Square::all() {
+                        let (plain, promoted) = normal_move_candidates(&position, from, &setting);
+                        for to in Square::all() {
+                            for (promote, candidates) in [(false, plain), (true, promoted)] {
+                                assert_eq!(
+                                    candidates.contains(to),
+                                    is_valid(
+                                        &position,
+                                        Move::Normal { from, to, promote },
+                                        &setting
+                                    ),
+                                    "{setting:?} {side:?} {from:?} {to:?} {promote}"
+                                );
+                            }
+                        }
+                    }
+                    for piece in Piece::all() {
+                        let candidates = drop_candidates(&position, piece, &setting);
+                        for to in Square::all() {
+                            assert_eq!(
+                                candidates.contains(to),
+                                is_valid(&position, Move::Drop { piece, to }, &setting),
+                                "{setting:?} {piece:?} {to:?}"
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
 
     #[test]
     fn drop_pawn_0() {
